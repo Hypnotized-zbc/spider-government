@@ -4,6 +4,25 @@
 
 ---
 
+## v1.4.0 — 2026-08-07
+
+### 新增
+- PDF 附件爬取：
+  - `extract_detail()` 解析 `.ewb-blue-a` 的 `downloadAttach` 链接（AttachGuid/FileCode/ClientGuid + 文件名）
+  - `is_pdf()` 按扩展名判断附件类型，仅下载 `.pdf`
+  - `download_attachment()` 用 Edge CDP 导航触发下载（先导航 cqggzy 根域种 cookie，再导航附件 URL，浏览器原生处理 521 反爬），校验 PDF 头（%PDF）后移入附件目录
+  - `download_pdf_attachments()` 批量下载，每份公告一个子目录
+- 打包：`make_full_zip()` docx 在 zip 根目录，PDF 附件按公告名目录组织
+
+### 修复
+- 附件下载域 ggzydl.cqggzy.com 有 521 反爬：requests 直连失败（CORS/JS challenge）→ 改用 Edge CDP 导航下载（Browser.setDownloadBehavior + 先种 cookie）
+
+### 验证
+- 以第一份公告（烟草公司潼南项目）实测：识别 4 个附件（2 PDF + 1 rar + 1 cqzf），仅下载 2 个 PDF（招标公告.pdf 261KB、工程量清单.pdf 12MB）
+- 完整 zip 打包成功（6.7MB），已复制到桌面
+
+---
+
 ## v1.3.2 — 2026-08-07
 
 ### 新增
