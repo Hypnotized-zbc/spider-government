@@ -33,6 +33,8 @@ FILES = [
     "spider_newest.py",
     "tools/upload_github.py",
     "tools/score_reports.py",
+    "company_profiles/渝发建设.json",
+    "company_profiles/市政环境.json",
 ]
 
 # 需要从远程删除的旧文件（本地已移除/重命名）
