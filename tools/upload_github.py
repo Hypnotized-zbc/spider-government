@@ -34,6 +34,11 @@ FILES = [
     "tools/upload_github.py",
 ]
 
+# 需要从远程删除的旧文件（本地已移除/重命名）
+REMOVE_FILES = [
+    "zbgg_crawler.py",
+]
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -80,7 +85,7 @@ def main():
         blobs[rel] = blob["sha"]
         print(f"blob  {rel}")
 
-    # 3. 构造树：保留远程已有条目，更新/新增本地文件
+    # 3. 构造树：保留远程已有条目，更新/新增本地文件；剔除 REMOVE_FILES
     base_tree = None
     tree_items = []
     if head:
@@ -89,6 +94,9 @@ def main():
         for entry in tree["tree"]:
             if entry["type"] == "tree" or entry["path"] in blobs:
                 continue  # 目录或将被替换的文件
+            if entry["path"] in REMOVE_FILES:
+                print(f"删除远程文件: {entry['path']}")
+                continue  # 需要删除的旧文件
             tree_items.append({"path": entry["path"], "mode": entry["mode"],
                                "type": "blob", "sha": entry["sha"]})
     for rel, sha in blobs.items():
