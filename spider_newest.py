@@ -923,7 +923,7 @@ def generate_html_report(meta: list[dict], html_path: Path,
             "att": att_names or "-",
         })
 
-    # 每个公司：重算分数，生成视图块
+    # 默认视角永远在首位；自定义公司在后，保持 company_profiles 内的文件顺序
     views = []
     options = []
     for pi, p in enumerate(profiles):
@@ -1007,7 +1007,17 @@ function switchView(idx) {{
   document.querySelectorAll('.view').forEach(function(v) {{ v.style.display = 'none'; }});
   var el = document.getElementById('view-' + idx);
   if (el) el.style.display = '';
+  try {{ localStorage.setItem('zbgg_view', idx); }} catch (e) {{}}
 }}
+(function() {{
+  var sel = document.getElementById('company');
+  var saved = null;
+  try {{ saved = localStorage.getItem('zbgg_view'); }} catch (e) {{}}
+  if (saved !== null && document.getElementById('view-' + saved)) {{
+    sel.value = saved;
+    switchView(saved);
+  }}
+}})();
 </script>
 </body>
 </html>"""

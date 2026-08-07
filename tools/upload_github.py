@@ -35,6 +35,9 @@ FILES = [
     "tools/score_reports.py",
     "company_profiles/渝发建设.json",
     "company_profiles/市政环境.json",
+    "company_profiles/电力能源.json",
+    "company_profiles/智能化弱电.json",
+    "company_profiles/公路交通.json",
 ]
 
 # 需要从远程删除的旧文件（本地已移除/重命名）
