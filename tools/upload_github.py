@@ -30,7 +30,7 @@ FILES = [
     "config.json",
     "main.py",
     "spider.py",
-    "zbgg_crawler.py",
+    "spider_newest.py",
     "tools/upload_github.py",
 ]
 

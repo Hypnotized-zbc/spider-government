@@ -4,6 +4,17 @@
 
 ---
 
+## v1.8.1 — 2026-08-07
+
+### 修改
+- 主程序文件重命名：`zbgg_crawler.py` → `spider_newest.py`
+- 同步更新：docstring、README、.vscode/tasks.json、.vscode/launch.json、tools/upload_github.py 清单
+
+### 验证
+- 重命名后导入/运行正常
+
+---
+
 ## v1.8.0 — 2026-08-07
 
 ### 通用化改造

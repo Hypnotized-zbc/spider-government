@@ -26,8 +26,8 @@ pip install -r requirements.txt
 
 ```bash
 source venv/bin/activate
-python3 zbgg_crawler.py              # 交互询问爬取范围（日期/序号/全部）
-python3 zbgg_crawler.py --limit 10   # 只处理前 10 份（测试用）
+python3 spider_newest.py              # 交互询问爬取范围（日期/序号/全部）
+python3 spider_newest.py --limit 10   # 只处理前 10 份（测试用）
 ```
 
 运行过程自动完成：
@@ -43,7 +43,7 @@ python3 zbgg_crawler.py --limit 10   # 只处理前 10 份（测试用）
 
 ```
 spider_framework/
-├── zbgg_crawler.py      # 主程序（爬取/解析/下载/打包/报表）
+├── spider_newest.py      # 主程序（爬取/解析/下载/打包/报表）
 ├── main.py              # 通用爬虫脚手架入口（次要）
 ├── spider.py            # 通用爬虫脚手架核心（次要）
 ├── config.json          # 脚手架规则配置
