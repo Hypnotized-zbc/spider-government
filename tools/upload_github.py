@@ -32,6 +32,7 @@ FILES = [
     "spider.py",
     "spider_newest.py",
     "tools/upload_github.py",
+    "tools/score_reports.py",
 ]
 
 # 需要从远程删除的旧文件（本地已移除/重命名）
