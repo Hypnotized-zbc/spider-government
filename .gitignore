@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 爬虫输出（数据产物不入库）
+output/
+
+# 备份目录（有独立 git 历史，不入主仓库）
+backups/
+
+# 凭据
+.git-credentials
+*.token
