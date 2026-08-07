@@ -665,11 +665,83 @@ def score_from_md(md_path: Path, att_names: str = "") -> dict:
     return value_components(fields.get("title", ""), txt, att_names)
 
 
+# ---------- 价值图表（纯 SVG，不依赖外部 CDN） ----------
+
+CHART_COLORS = ["#d35400", "#e67e22", "#f39c12", "#3498db", "#7f8c8d"]
+COMPONENT_NAMES = [("money_s", "金额"), ("type_s", "类型"), ("att_s", "附件"),
+                   ("kw_s", "关键词"), ("info_s", "信息量")]
+COMPONENT_MAX = {"money_s": 40.0, "type_s": 20.0, "att_s": 15.0,
+                 "kw_s": 15.0, "info_s": 10.0}
+
+
+def _short_title(title: str, n: int = 14) -> str:
+    return title if len(title) <= n else title[:n] + "…"
+
+
+def make_value_charts(rows: list[dict]) -> str:
+    """生成价值图表 HTML（横向条形图 + 分量堆叠图），无数据时返回空串。"""
+    if not rows:
+        return ""
+    srows = sorted(rows, key=lambda r: -r["score"])
+
+    # ---- 图1: 价值总分横向条形图 ----
+    H1 = len(srows) * 30 + 46
+    parts1 = []
+    parts1.append(f'<svg viewBox="0 0 960 {H1}" xmlns="http://www.w3.org/2000/svg" '
+                  f'preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">')
+    parts1.append(f'<text x="8" y="24" font-size="16" font-weight="bold" fill="#1f3a5f">价值总分排行（满分 100）</text>')
+    for i, r in enumerate(srows):
+        y = 46 + i * 30
+        sc = r["score"]
+        color = "#c0392b" if sc >= 75 else "#e67e22" if sc >= 60 else "#95a5a6"
+        parts1.append(f'<text x="8" y="{y+15}" font-size="12" fill="#333" text-anchor="start">{_short_title(r["title"])}</text>')
+        parts1.append(f'<rect x="170" y="{y+2}" width="660" height="20" rx="4" fill="#eef2f7"/>')
+        w = max(4, 660 * sc / 100.0)
+        parts1.append(f'<rect x="170" y="{y+2}" width="{w:.1f}" height="20" rx="4" fill="{color}"/>')
+        parts1.append(f'<text x="838" y="{y+17}" font-size="13" font-weight="bold" fill="#1f3a5f">{sc:.1f}</text>')
+    parts1.append("</svg>")
+
+    # ---- 图2: 分量堆叠图（各维度占满分比例） ----
+    H2 = len(srows) * 30 + 90
+    parts2 = []
+    parts2.append(f'<svg viewBox="0 0 960 {H2}" xmlns="http://www.w3.org/2000/svg" '
+                  f'preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">')
+    parts2.append(f'<text x="8" y="24" font-size="16" font-weight="bold" fill="#1f3a5f">价值构成（按维度满分归一）</text>')
+    # 图例
+    lx = 170
+    for (k, name), color in zip(COMPONENT_NAMES, CHART_COLORS):
+        parts2.append(f'<rect x="{lx}" y="36" width="12" height="12" fill="{color}"/>')
+        parts2.append(f'<text x="{lx+16}" y="46" font-size="12" fill="#333">{name}</text>')
+        lx += 66
+    for i, r in enumerate(srows):
+        y = 62 + i * 30
+        parts2.append(f'<text x="8" y="{y+15}" font-size="12" fill="#333">{_short_title(r["title"])}</text>')
+        parts2.append(f'<rect x="170" y="{y+2}" width="660" height="20" rx="4" fill="#eef2f7"/>')
+        x = 170
+        for (k, name), color in zip(COMPONENT_NAMES, CHART_COLORS):
+            seg = 660 * r[k] / COMPONENT_MAX[k]
+            if seg < 0.5:
+                continue
+            parts2.append(f'<rect x="{x:.1f}" y="{y+2}" width="{seg:.1f}" height="20" fill="{color}"/>')
+            x += seg
+        parts2.append(f'<text x="838" y="{y+17}" font-size="13" font-weight="bold" fill="#1f3a5f">{r["score"]:.1f}</text>')
+    parts2.append("</svg>")
+
+    return (f'<div class="charts">'
+            f'<div class="chart-card"><div class="chart-title">价值高低总览</div>{chr(10).join(parts1)}</div>'
+            f'<div class="chart-card"><div class="chart-title">价值构成分析</div>{chr(10).join(parts2)}</div>'
+            f'</div>')
+
+
 def generate_html_report(meta_path: Path, html_path: Path) -> Path:
-    """根据 meta.json 生成 HTML 统计报表，按价值分降序排列。"""
+    """根据 meta.json 生成 HTML 统计报表。
+
+    原表格保持原有结构与顺序不变，价值判断以独立 SVG 图表形式
+    追加在表格上方（价值总分排行 + 价值构成分析）。
+    """
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     rows = []
-    for m in meta:
+    for i, m in enumerate(meta, 1):
         md_path = Path(m["md"])
         fields = parse_md_fields(md_path) if md_path.exists() else {}
         body = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
@@ -677,6 +749,7 @@ def generate_html_report(meta_path: Path, html_path: Path) -> Path:
         att_names = "、".join(a["name"] for a in m.get("attachments", []))
         v = score_from_md(md_path, att_names)
         rows.append({
+            "index": i,
             "title": fields.get("title") or m["title"],
             "url": m["url"],
             "code": fields.get("code") or "-",
@@ -693,30 +766,26 @@ def generate_html_report(meta_path: Path, html_path: Path) -> Path:
             "kw_hit": v["kw_hit"],
         })
 
-    rows.sort(key=lambda r: -r["score"])
+    # 原表：结构与原始版本一致（序号/名称/编号/时间/金额/工期/附件）
     body_rows = []
-    for i, r in enumerate(rows, 1):
-        # 价值分量：金额/类型/附件/关键词/信息量
-        parts = (f"金额{r['money_s']:.0f} 类型{r['type_s']:.0f} "
-                 f"附件{r['att_s']:.0f} 关键词{r['kw_s']:.0f} 信息量{r['info_s']:.0f}")
-        kw_tip = f"（命中：{'、'.join(r['kw_hit'])}）" if r["kw_hit"] else ""
-        bar_w = int(r["score"])  # 0-100 分，直接映射宽度
+    for r in rows:
         body_rows.append(f"""<tr>
-<td>{i}</td>
+<td>{r['index']}</td>
 <td><a href="{r['url']}" target="_blank">{r['title']}</a></td>
 <td>{r['code']}</td>
 <td>{r['info_time']}</td>
 <td>{r['investment']}</td>
 <td>{r['duration']}</td>
 <td>{r['att']}</td>
-<td class="score"><div class="bar"><div class="fill" style="width:{bar_w}%"></div></div><b>{r['score']:.1f}</b><br><small>{parts}{kw_tip}</small></td>
 </tr>""")
+
+    charts = make_value_charts(rows)
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>招标报告统计报表（按价值排序）</title>
+<title>招标报告统计报表</title>
 <style>
 body {{ font-family: "Microsoft YaHei", "宋体", sans-serif; margin: 30px; background: #f5f7fa; }}
 h1 {{ text-align: center; color: #1f3a5f; }}
@@ -727,18 +796,18 @@ th {{ background: #1f3a5f; color: #fff; }}
 tr:nth-child(even) {{ background: #f8fafc; }}
 a {{ color: #1f6feb; text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
-td.score {{ min-width: 190px; }}
-.bar {{ display: inline-block; width: 70px; height: 8px; background: #e3e8ef; border-radius: 4px; vertical-align: middle; margin-right: 6px; }}
-.fill {{ height: 100%; background: #e67e22; border-radius: 4px; }}
-small {{ color: #888; }}
+.charts {{ display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 24px; }}
+.chart-card {{ flex: 1 1 480px; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); padding: 16px; }}
+.chart-title {{ font-size: 15px; font-weight: bold; color: #1f3a5f; margin-bottom: 8px; }}
 </style>
 </head>
 <body>
-<h1>招标报告统计报表（按价值分降序）</h1>
-<p class="meta">共 {len(rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 价值分 = 金额(log,40) + 类型(20) + 附件(15) + 关键词(15) + 信息量(10)</p>
+<h1>招标报告统计报表</h1>
+<p class="meta">共 {len(rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+{charts}
 <table>
 <thead>
-<tr><th>排名</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th><th>价值分</th></tr>
+<tr><th>序号</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th></tr>
 </thead>
 <tbody>
 {''.join(body_rows)}
