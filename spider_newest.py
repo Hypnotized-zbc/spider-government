@@ -14,6 +14,7 @@
 """
 import datetime
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -589,31 +590,133 @@ def extract_key_info(body: str) -> dict:
     return info
 
 
+# ---------- 价值评分 ----------
+
+# 招标类型 → 分值（总承包/施工通常体量大，咨询/监理次之）
+TYPE_VALUE = [
+    (20, ["EPC", "工程总承包", "设计施工", "设计采购施工"]),
+    (16, ["施工总承包", "工程施工", "标段施工", "施工招标"]),
+    (12, ["全过程咨询", "项目管理"]),
+    (8,  ["监理", "勘察设计", "初步设计", "施工图设计"]),
+]
+# 业务方向关键词（按自己关心的领域增删，命中越多价值越高）
+INTEREST_KEYWORDS = [
+    "老旧小区", "学校", "医院", "产业园", "数据中心", "智慧",
+    "市政", "道路", "污水", "给排水", "绿化", "装修", "托育",
+]
+
+
+def value_components(title: str, body: str, att_names: str) -> dict:
+    """从标题+正文+附件名计算价值分量，返回 {score, money, type, att, kw, info}。
+
+    总分 0-100：金额 0-40（log 缩放，避免大数碾压），类型 0-20，
+    附件 0-15（含工程量清单/图纸=资料全，价值高），关键词 0-15，信息量 0-10。
+    """
+    full = f"{title} {body}"
+    money_v = 0.0
+    for pat in [r"总投资金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
+                r"总投资[约为]?[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
+                r"合同估算金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
+                r"估算金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元"]:
+        m = re.search(pat, body)
+        if m:
+            try:
+                money_v = float(m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+            break
+    # log 缩放：100万(2)→20分，1000万(3)→30分，1亿(4)→40分
+    money_s = 0.0 if money_v <= 0 else min(40.0, 10.0 * (math.log10(money_v) if money_v > 0 else 0))
+
+    type_s = 4  # 默认值
+    for score, kws in TYPE_VALUE:
+        if any(kw in full for kw in kws):
+            type_s = score
+            break
+
+    att_s = 0.0
+    if "工程量清单" in att_names or "图纸" in att_names:
+        att_s = 15.0
+    elif att_names:
+        att_s = 8.0
+
+    hit = [kw for kw in INTEREST_KEYWORDS if kw in full]
+    kw_s = min(15.0, 3.0 * len(hit))
+
+    info_s = 2.0
+    n = len(body)
+    if n > 3000:
+        info_s = 10.0
+    elif n > 1500:
+        info_s = 7.0
+    elif n > 500:
+        info_s = 4.0
+
+    total = round(money_s + type_s + att_s + kw_s + info_s, 1)
+    return {"score": total, "money": money_v, "money_s": money_s, "type_s": type_s,
+            "att_s": att_s, "kw_s": kw_s, "info_s": info_s, "kw_hit": hit,
+            "type": [t for _, t in TYPE_VALUE], "money_w": round(money_v, 2)}
+
+
+def score_from_md(md_path: Path, att_names: str = "") -> dict:
+    """从 md 文件 + 附件名计算价值分（供 HTML 报表与 meta 回填用）。"""
+    txt = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+    fields = parse_md_fields(md_path)
+    return value_components(fields.get("title", ""), txt, att_names)
+
+
 def generate_html_report(meta_path: Path, html_path: Path) -> Path:
-    """根据 meta.json 生成 HTML 统计报表。"""
+    """根据 meta.json 生成 HTML 统计报表，按价值分降序排列。"""
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     rows = []
-    for i, m in enumerate(meta, 1):
+    for m in meta:
         md_path = Path(m["md"])
         fields = parse_md_fields(md_path) if md_path.exists() else {}
         body = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
         key = extract_key_info(body)
         att_names = "、".join(a["name"] for a in m.get("attachments", []))
-        rows.append(f"""<tr>
+        v = score_from_md(md_path, att_names)
+        rows.append({
+            "title": fields.get("title") or m["title"],
+            "url": m["url"],
+            "code": fields.get("code") or "-",
+            "info_time": fields.get("info_time") or m["date"],
+            "investment": key["investment"] or "-",
+            "duration": key["duration"] or "-",
+            "att": att_names or "-",
+            "score": v["score"],
+            "money_s": v["money_s"],
+            "type_s": v["type_s"],
+            "att_s": v["att_s"],
+            "kw_s": v["kw_s"],
+            "info_s": v["info_s"],
+            "kw_hit": v["kw_hit"],
+        })
+
+    rows.sort(key=lambda r: -r["score"])
+    body_rows = []
+    for i, r in enumerate(rows, 1):
+        # 价值分量：金额/类型/附件/关键词/信息量
+        parts = (f"金额{r['money_s']:.0f} 类型{r['type_s']:.0f} "
+                 f"附件{r['att_s']:.0f} 关键词{r['kw_s']:.0f} 信息量{r['info_s']:.0f}")
+        kw_tip = f"（命中：{'、'.join(r['kw_hit'])}）" if r["kw_hit"] else ""
+        bar_w = int(r["score"])  # 0-100 分，直接映射宽度
+        body_rows.append(f"""<tr>
 <td>{i}</td>
-<td><a href="{m['url']}" target="_blank">{fields.get('title') or m['title']}</a></td>
-<td>{fields.get('code') or '-'}</td>
-<td>{fields.get('info_time') or m['date']}</td>
-<td>{key['investment'] or '-'}</td>
-<td>{key['duration'] or '-'}</td>
-<td>{att_names or '-'}</td>
+<td><a href="{r['url']}" target="_blank">{r['title']}</a></td>
+<td>{r['code']}</td>
+<td>{r['info_time']}</td>
+<td>{r['investment']}</td>
+<td>{r['duration']}</td>
+<td>{r['att']}</td>
+<td class="score"><div class="bar"><div class="fill" style="width:{bar_w}%"></div></div><b>{r['score']:.1f}</b><br><small>{parts}{kw_tip}</small></td>
 </tr>""")
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>招标报告统计报表</title>
+<title>招标报告统计报表（按价值排序）</title>
 <style>
 body {{ font-family: "Microsoft YaHei", "宋体", sans-serif; margin: 30px; background: #f5f7fa; }}
 h1 {{ text-align: center; color: #1f3a5f; }}
@@ -624,17 +727,21 @@ th {{ background: #1f3a5f; color: #fff; }}
 tr:nth-child(even) {{ background: #f8fafc; }}
 a {{ color: #1f6feb; text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
+td.score {{ min-width: 190px; }}
+.bar {{ display: inline-block; width: 70px; height: 8px; background: #e3e8ef; border-radius: 4px; vertical-align: middle; margin-right: 6px; }}
+.fill {{ height: 100%; background: #e67e22; border-radius: 4px; }}
+small {{ color: #888; }}
 </style>
 </head>
 <body>
-<h1>招标报告统计报表</h1>
-<p class="meta">共 {len(rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+<h1>招标报告统计报表（按价值分降序）</h1>
+<p class="meta">共 {len(rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 价值分 = 金额(log,40) + 类型(20) + 附件(15) + 关键词(15) + 信息量(10)</p>
 <table>
 <thead>
-<tr><th>序号</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th></tr>
+<tr><th>排名</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th><th>价值分</th></tr>
 </thead>
 <tbody>
-{''.join(rows)}
+{''.join(body_rows)}
 </tbody>
 </table>
 </body>
@@ -765,9 +872,11 @@ def main(limit: int | None = None):
         att_dir = ATTACH_DIR / name
         att_dir.mkdir(parents=True, exist_ok=True)
         pdfs = download_pdf_attachments(detail.get("attachments", []), att_dir)
+        att_names = "、".join(a["name"] for a in pdfs)
+        v = value_components(detail["title"], detail["body"], att_names)
         meta.append({"date": it["date"], "title": detail["title"],
                      "url": it["url"], "md": str(md_path), "docx": str(docx_path),
-                     "attachments": pdfs})
+                     "attachments": pdfs, "score": v["score"]})
         done.add(it["url"])
         # 每 10 条落盘一次进度
         if len(meta) % 10 == 0:

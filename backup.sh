@@ -9,8 +9,9 @@ NOTE="${1:-}"
 DIR="backups/${STAMP}"
 mkdir -p "$DIR"
 
-# 备份所有源码与配置
-cp -v spider.py main.py config.json "$DIR/" 2>/dev/null || true
+# 备份所有源码与配置（backup.sh 自身所在目录的 py 源码 + tools）
+cp -v spider_newest.py zbgg_crawler.py config.json "$DIR/" 2>/dev/null || true
+cp -rv tools/*.py "$DIR/" 2>/dev/null || true
 
 # 备注写入备份目录，便于追溯
 if [ -n "$NOTE" ]; then
