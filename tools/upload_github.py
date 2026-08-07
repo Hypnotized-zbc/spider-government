@@ -25,6 +25,8 @@ FILES = [
     "README.md",
     "UPDATES.md",
     "backup.sh",
+    "install.sh",
+    "requirements.txt",
     "config.json",
     "main.py",
     "spider.py",

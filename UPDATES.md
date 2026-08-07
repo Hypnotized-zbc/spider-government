@@ -4,6 +4,21 @@
 
 ---
 
+## v1.8.0 — 2026-08-07
+
+### 通用化改造
+- Edge 路径自动探测：`tools/start_edge_cdp.ps1` 从注册表 + 常见路径自动定位 msedge.exe，找不到报 `EDGE_NOT_FOUND`（不再写死安装路径）
+- 桌面路径自动发现：`desktop_path()` 优先 PowerShell 获取，失败则扫描 `/mnt/c/Users/*/Desktop`，兜底输出目录（不再写死用户名）
+- 附件临时目录：`windows_temp_dir()` 用 Windows TEMP（PowerShell 获取），兜底项目 output（不再写死 `/mnt/c/tmp_zbgg_dl`）
+- 依赖清单：新增 `requirements.txt` + `install.sh` 一键安装
+- README 重写：环境要求（Windows + WSL2 + Edge）、安装、运行、输出说明
+- PowerShell 脚本注释统一转英文，规避编码解析风险
+
+### 验证
+- 通用化后前 2 份报告端到端通过：详情渲染、3 个 PDF 附件、汇总包复制桌面、HTML 报表生成
+
+---
+
 ## v1.7.0 — 2026-08-07
 
 ### 新增

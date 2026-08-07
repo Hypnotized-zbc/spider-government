@@ -196,13 +196,15 @@ def download_attachment(att: dict, save_dir: Path, index: int = 0,
                         tries: int = 3) -> Path | None:
     """用 Edge CDP 下载单个附件到 save_dir，返回文件路径；失败重试后返回 None。"""
     save_dir.mkdir(parents=True, exist_ok=True)
-    win_tmp = Path("/mnt/c/tmp_zbgg_dl")
+    win_tmp = windows_temp_dir()
     win_tmp.mkdir(parents=True, exist_ok=True)
     url = attach_url(att)
     dl_ps1 = subprocess.run(["wslpath", "-w", str(DOWNLOAD_PS1)],
                             capture_output=True, text=True).stdout.strip()
+    win_tmp_win = subprocess.run(["wslpath", "-w", str(win_tmp)],
+                                 capture_output=True, text=True).stdout.strip()
     cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-           "-File", dl_ps1, url, r"C:\tmp_zbgg_dl"]
+           "-File", dl_ps1, url, win_tmp_win]
     for attempt in range(1, tries + 1):
         # 清空临时目录
         for f in win_tmp.iterdir():
@@ -494,26 +496,57 @@ def make_summary_zip(zip_path: Path, docx_dir: Path, att_dir: Path):
 
 
 def desktop_path() -> Path:
-    """获取 Windows 桌面路径。"""
+    """获取 Windows 桌面路径（自动发现，不依赖特定用户名）。"""
+    # 1. PowerShell 获取
     try:
         out = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command",
              "[Environment]::GetFolderPath('Desktop')"],
             capture_output=True, timeout=20)
         p = out.stdout.decode("utf-8", errors="ignore").strip()
-        if p:
-            # C:\Users\... -> /mnt/c/Users/...
+        if p and "\\" in p:
             p = p.replace("\\", "/")
             drive = p[0].lower()
-            return Path(f"/mnt/{drive}{p[2:]}")
+            cand = Path(f"/mnt/{drive}{p[2:]}")
+            if cand.is_dir():
+                return cand
     except Exception:
         pass
-    # 回退：常见用户名
-    for cand in ("Jerry Zhao",):
-        p = Path(f"/mnt/c/Users/{cand}/Desktop")
-        if p.is_dir():
-            return p
-    return Path.home()
+    # 2. 扫描 /mnt/c/Users/*/Desktop（自动发现，不写死用户名）
+    try:
+        for u in Path("/mnt/c/Users").iterdir():
+            if u.is_dir():
+                cand = u / "Desktop"
+                if cand.is_dir():
+                    return cand
+    except Exception:
+        pass
+    # 3. 兜底：输出目录下的 desktop 子目录
+    d = OUT_DIR / "desktop"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def windows_temp_dir() -> Path:
+    """获取 Windows 可写的临时目录（WSL 视角），用于附件中转。"""
+    try:
+        out = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             "[System.IO.Path]::GetTempPath()"],
+            capture_output=True, timeout=20)
+        p = out.stdout.decode("utf-8", errors="ignore").strip()
+        if p and "\\" in p:
+            p = p.replace("\\", "/")
+            drive = p[0].lower()
+            cand = Path(f"/mnt/{drive}{p[2:]}")
+            if cand.is_dir():
+                return cand / "zbgg_dl"
+    except Exception:
+        pass
+    # 兜底：项目 output 下
+    d = OUT_DIR / "tmp_dl"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ---------- HTML 统计报表 ----------
