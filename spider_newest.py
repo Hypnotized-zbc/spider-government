@@ -596,7 +596,7 @@ def extract_key_info(body: str) -> dict:
     return info
 
 
-# ---------- 价值评分 ----------
+# ---------- 价值评分（按公司画像） ----------
 
 # 招标类型 → 分值（总承包/施工通常体量大，咨询/监理次之）
 TYPE_VALUE = [
@@ -605,20 +605,121 @@ TYPE_VALUE = [
     (12, ["全过程咨询", "项目管理"]),
     (8,  ["监理", "勘察设计", "初步设计", "施工图设计"]),
 ]
-# 业务方向关键词（按自己关心的领域增删，命中越多价值越高）
+# 业务方向关键词（默认画像用，按自己关心的领域增删，命中越多价值越高）
 INTEREST_KEYWORDS = [
     "老旧小区", "学校", "医院", "产业园", "数据中心", "智慧",
     "市政", "道路", "污水", "给排水", "绿化", "装修", "托育",
 ]
+# 资质等级次序：一级 > 二级 > 三级 > 不分等级(0)
+QUAL_LEVEL = {"一级": 3, "二级": 2, "三级": 1}
+
+PROFILE_DIR = Path(__file__).parent / "company_profiles"
+
+DEFAULT_PROFILE = {
+    "name": "默认（综合视角）",
+    "desc": "未配置公司画像时的通用评分",
+    "keywords": {k: 1 for k in INTEREST_KEYWORDS},
+    "exclude_keywords": [],
+    "qualifications": [],
+    "budget_range": None,
+    "regions": [],
+    "weights": {"money": 0.30, "type": 0.15, "attach": 0.15,
+                "kw": 0.20, "region": 0.10, "qual": 0.10},
+}
 
 
-def value_components(title: str, body: str, att_names: str) -> dict:
-    """从标题+正文+附件名计算价值分量，返回 {score, money, type, att, kw, info}。
+def load_profiles() -> list[dict]:
+    """读取 company_profiles/*.json，未配置时返回默认画像。"""
+    profiles = [dict(DEFAULT_PROFILE)]
+    if not PROFILE_DIR.is_dir():
+        return profiles
+    for f in sorted(PROFILE_DIR.glob("*.json")):
+        try:
+            p = json.loads(f.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  画像解析失败 {f.name}: {e}", flush=True)
+            continue
+        p.setdefault("name", f.stem)
+        p.setdefault("desc", "")
+        p.setdefault("keywords", {})
+        p.setdefault("exclude_keywords", [])
+        p.setdefault("qualifications", [])
+        p.setdefault("budget_range", None)
+        p.setdefault("regions", [])
+        p.setdefault("weights", dict(DEFAULT_PROFILE["weights"]))
+        profiles.append(p)
+    return profiles
 
-    总分 0-100：金额 0-40（log 缩放，避免大数碾压），类型 0-20，
-    附件 0-15（含工程量清单/图纸=资料全，价值高），关键词 0-15，信息量 0-10。
+
+def _qual_stem(q: str) -> str:
+    """资质主干词：去掉等级与后缀，如 '建筑工程施工总承包二级' → '建筑工程施工总承包'。"""
+    return re.sub(r"[一二三四]级|及以上|及以下|不分等级", "", q).strip()
+
+
+def qual_mismatch(body: str, qualifications: list[str]) -> tuple[str, float]:
+    """资质匹配：返回 (说明, 资质分 0-10)。
+
+    - 公司未填资质：中性 6 分
+    - 正文要求与公司资质主干词命中且等级不高于公司：10 分
+    - 命中但正文要求等级更高：0 分（资质不符）
+    - 正文无资质要求：7 分
+    - 正文有资质要求但无命中：2 分
     """
+    if not qualifications:
+        return "未配置资质", 6.0
+    if "资质" not in body and "总承包" not in body and "专业承包" not in body:
+        return "正文未要求资质", 7.0
+    for q in qualifications:
+        stem = _qual_stem(q)
+        if stem in body:
+            m = re.search(re.escape(stem) + r"[^，。；\n]*?([一二三四]级)", body)
+            req_lv = QUAL_LEVEL.get(m.group(1), 0) if m else 0
+            own_lv = QUAL_LEVEL.get(re.search(r"([一二三四]级)", q).group(1), 0) if re.search(r"([一二三四]级)", q) else 0
+            if req_lv > own_lv:
+                return f"需{stem}（高于本公司）", 0.0
+            return f"资质匹配（{stem}）", 10.0
+    return "资质方向不符", 2.0
+
+
+def region_score(body: str, regions: list[str]) -> tuple[str, float]:
+    """地区匹配 0-10：正文建设地点命中关注区域→10，未写地点→5，未命中→0。"""
+    m = re.search(r"建设地点[：:]\s*([^。\n；]+)", body)
+    loc = m.group(1).strip() if m else ""
+    if not regions:
+        return "未配置地区", 5.0
+    if not loc:
+        return "正文未写建设地点", 5.0
+    for r in regions:
+        if r in loc:
+            return f"建设地点在{r}", 10.0
+    return f"建设地点不在关注区域（{loc[:12]}）", 0.0
+
+
+def budget_score(money_v: float, budget_range) -> tuple[str, float]:
+    """预算区间匹配：区间内按 log 给分（上限30），超出上限→0，低于下限→低分。"""
+    if budget_range is None:
+        return "", min(30.0, 7.5 * math.log10(money_v)) if money_v > 0 else 0.0
+    lo, hi = budget_range
+    if money_v <= 0:
+        return "未写明金额", 0.0
+    if money_v > hi:
+        return f"超出预算上限（{hi}万）", 0.0
+    if money_v < lo:
+        return f"低于预算下限（{lo}万）", min(10.0, 7.5 * math.log10(money_v))
+    return f"在预算区间内", min(30.0, 7.5 * math.log10(money_v))
+
+
+def value_components(title: str, body: str, att_names: str,
+                     profile: dict | None = None) -> dict:
+    """按公司画像从标题+正文+附件名计算价值分量，返回 0-100 总分与明细。
+
+    维度（满分=权重×100）：金额30 / 类型15 / 附件15 / 关键词20 / 地区10 / 资质10。
+    """
+    profile = profile or DEFAULT_PROFILE
+    w = profile.get("weights", DEFAULT_PROFILE["weights"])
     full = f"{title} {body}"
+
+    # 金额
     money_v = 0.0
     for pat in [r"总投资金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
                 r"总投资[约为]?[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
@@ -631,61 +732,93 @@ def value_components(title: str, body: str, att_names: str) -> dict:
             except ValueError:
                 pass
             break
-    # log 缩放：100万(2)→20分，1000万(3)→30分，1亿(4)→40分
-    money_s = 0.0 if money_v <= 0 else min(40.0, 10.0 * (math.log10(money_v) if money_v > 0 else 0))
+    money_note, money_s = budget_score(money_v, profile.get("budget_range"))
 
-    type_s = 4  # 默认值
+    # 类型
+    type_s = 4
     for score, kws in TYPE_VALUE:
         if any(kw in full for kw in kws):
             type_s = score
             break
+    type_s = min(type_s, 15)
 
+    # 附件
     att_s = 0.0
     if "工程量清单" in att_names or "图纸" in att_names:
         att_s = 15.0
     elif att_names:
         att_s = 8.0
 
-    hit = [kw for kw in INTEREST_KEYWORDS if kw in full]
-    kw_s = min(15.0, 3.0 * len(hit))
+    # 关键词：按画像加权命中
+    kws_map = profile.get("keywords", {})
+    hit = [kw for kw in kws_map if kw in full]
+    kw_s = min(20.0, 2.0 * sum(kws_map.get(kw, 1) for kw in hit))
+    # 排除词命中 → 大幅降权
+    excl_hit = [kw for kw in profile.get("exclude_keywords", []) if kw in full]
+    if excl_hit:
+        kw_s = min(kw_s, 5.0) - 5.0  # 命中排除词: 关键词分封顶 0
+        if kw_s < 0:
+            kw_s = 0.0
 
-    info_s = 2.0
-    n = len(body)
-    if n > 3000:
-        info_s = 10.0
-    elif n > 1500:
-        info_s = 7.0
-    elif n > 500:
-        info_s = 4.0
+    # 地区与资质
+    region_note, region_s = region_score(body, profile.get("regions", []))
+    qual_note, qual_s = qual_mismatch(body, profile.get("qualifications", []))
 
-    total = round(money_s + type_s + att_s + kw_s + info_s, 1)
-    return {"score": total, "money": money_v, "money_s": money_s, "type_s": type_s,
-            "att_s": att_s, "kw_s": kw_s, "info_s": info_s, "kw_hit": hit,
-            "type": [t for _, t in TYPE_VALUE], "money_w": round(money_v, 2)}
+    # 加权总分
+    total = round(w.get("money", 0.30) * 100 / 30 * money_s
+                  + w.get("type", 0.15) * 100 / 15 * type_s
+                  + w.get("attach", 0.15) * 100 / 15 * att_s
+                  + w.get("kw", 0.20) * 100 / 20 * kw_s
+                  + w.get("region", 0.10) * 100 / 10 * region_s
+                  + w.get("qual", 0.10) * 100 / 10 * qual_s, 1)
+
+    return {"score": total, "money": money_v, "money_s": money_s,
+            "type_s": type_s, "att_s": att_s, "kw_s": kw_s,
+            "region_s": region_s, "qual_s": qual_s,
+            "kw_hit": hit, "excl_hit": excl_hit,
+            "money_note": money_note, "region_note": region_note,
+            "qual_note": qual_note, "money_w": round(money_v, 2)}
 
 
-def score_from_md(md_path: Path, att_names: str = "") -> dict:
+def score_from_md(md_path: Path, att_names: str = "",
+                  profile: dict | None = None) -> dict:
     """从 md 文件 + 附件名计算价值分（供 HTML 报表与 meta 回填用）。"""
     txt = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
     fields = parse_md_fields(md_path)
-    return value_components(fields.get("title", ""), txt, att_names)
+    return value_components(fields.get("title", ""), txt, att_names, profile)
 
 
 # ---------- 价值图表（纯 SVG，不依赖外部 CDN） ----------
 
-CHART_COLORS = ["#d35400", "#e67e22", "#f39c12", "#3498db", "#7f8c8d"]
+CHART_COLORS = ["#d35400", "#e67e22", "#f39c12", "#3498db", "#27ae60"]
 COMPONENT_NAMES = [("money_s", "金额"), ("type_s", "类型"), ("att_s", "附件"),
-                   ("kw_s", "关键词"), ("info_s", "信息量")]
-COMPONENT_MAX = {"money_s": 40.0, "type_s": 20.0, "att_s": 15.0,
-                 "kw_s": 15.0, "info_s": 10.0}
+                   ("kw_s", "关键词"), ("region_s", "地区"), ("qual_s", "资质")]
+COMPONENT_MAX = {"money_s": 30.0, "type_s": 15.0, "att_s": 15.0,
+                 "kw_s": 20.0, "region_s": 10.0, "qual_s": 10.0}
 
 
 def _short_title(title: str, n: int = 14) -> str:
     return title if len(title) <= n else title[:n] + "…"
 
 
+def _match_notes(r: dict) -> str:
+    """拼出匹配原因说明（金额/地区/资质/关键词）。"""
+    notes = []
+    if r.get("money_note"):
+        notes.append(f"金额：{r['money_note']}")
+    if r.get("region_note"):
+        notes.append(f"地区：{r['region_note']}")
+    if r.get("qual_note"):
+        notes.append(f"资质：{r['qual_note']}")
+    if r.get("kw_hit"):
+        notes.append(f"关键词：{'、'.join(r['kw_hit'])}")
+    if r.get("excl_hit"):
+        notes.append(f"排除词命中：{'、'.join(r['excl_hit'])}")
+    return "；".join(notes) if notes else "无特殊说明"
+
+
 def make_value_charts(rows: list[dict]) -> str:
-    """生成价值图表 HTML（横向条形图 + 分量堆叠图），无数据时返回空串。"""
+    """生成价值图表 HTML（总分条形图 + 构成堆叠图 + 匹配明细），无数据返回空串。"""
     if not rows:
         return ""
     srows = sorted(rows, key=lambda r: -r["score"])
@@ -733,29 +866,53 @@ def make_value_charts(rows: list[dict]) -> str:
         parts2.append(f'<text x="838" y="{y+17}" font-size="13" font-weight="bold" fill="#1f3a5f">{r["score"]:.1f}</text>')
     parts2.append("</svg>")
 
+    # ---- 匹配明细 ----
+    notes = []
+    for i, r in enumerate(srows, 1):
+        notes.append(f"<li><b>{i}. {r['title']}</b>（{r['score']:.1f} 分）<br>"
+                     f"<span class=\"note\">{_match_notes(r)}</span></li>")
+
     return (f'<div class="charts">'
             f'<div class="chart-card"><div class="chart-title">价值高低总览</div>{chr(10).join(parts1)}</div>'
-            f'<div class="chart-card"><div class="chart-title">价值构成分析</div>{chr(10).join(parts2)}</div>'
+            f'<div class="chart-card"><div class="chart-title">价值构成分析</div>{chr(10).join(parts2)}'
+            f'<ul class="notes">{chr(10).join(notes)}</ul></div>'
             f'</div>')
 
 
-def generate_html_report(meta: list[dict], html_path: Path) -> Path:
-    """根据报告记录列表生成 HTML 统计报表。
+def _profile_desc(p: dict) -> str:
+    """公司画像说明（用于报表展示）。"""
+    parts = [p.get("desc", "")] if p.get("desc") else []
+    kws = p.get("keywords", {})
+    if kws:
+        parts.append("关键词: " + "、".join(f"{k}({v})" for k, v in kws.items()))
+    if p.get("exclude_keywords"):
+        parts.append("排除: " + "、".join(p["exclude_keywords"]))
+    if p.get("qualifications"):
+        parts.append("资质: " + "、".join(p["qualifications"]))
+    br = p.get("budget_range")
+    if br:
+        parts.append(f"预算区间: {br[0]}~{br[1]}万元")
+    if p.get("regions"):
+        parts.append("关注区域: " + "、".join(p["regions"]))
+    return " ｜ ".join(parts) if parts else "无特殊配置"
 
-    只渲染传入的 records（本次爬取范围），不再从 meta.json 全量读取，
-    避免历史累积的报告反复出现在报表里。
-    原表格保持原有结构与顺序不变，价值判断以独立 SVG 图表形式
-    追加在表格上方（价值总分排行 + 价值构成分析）。
+
+def generate_html_report(meta: list[dict], html_path: Path,
+                         profiles: list[dict] | None = None) -> Path:
+    """根据报告记录生成 HTML 统计报表（单文件多公司下拉切换）。
+
+    每个公司画像生成独立视图块（画像说明 + 价值图表 + 原表按该公司价值降序），
+    顶部下拉切换，前端 JS 仅做显示切换，无外部依赖。未配置画像时只用默认视角。
     """
-    rows = []
+    profiles = profiles if profiles is not None else load_profiles()
+    base_rows = []
     for i, m in enumerate(meta, 1):
         md_path = Path(m["md"])
         fields = parse_md_fields(md_path) if md_path.exists() else {}
         body = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
         key = extract_key_info(body)
         att_names = "、".join(a["name"] for a in m.get("attachments", []))
-        v = score_from_md(md_path, att_names)
-        rows.append({
+        base_rows.append({
             "index": i,
             "title": fields.get("title") or m["title"],
             "url": m["url"],
@@ -764,19 +921,29 @@ def generate_html_report(meta: list[dict], html_path: Path) -> Path:
             "investment": key["investment"] or "-",
             "duration": key["duration"] or "-",
             "att": att_names or "-",
-            "score": v["score"],
-            "money_s": v["money_s"],
-            "type_s": v["type_s"],
-            "att_s": v["att_s"],
-            "kw_s": v["kw_s"],
-            "info_s": v["info_s"],
-            "kw_hit": v["kw_hit"],
         })
 
-    # 原表：结构与原始版本一致（序号/名称/编号/时间/金额/工期/附件）
-    body_rows = []
-    for r in rows:
-        body_rows.append(f"""<tr>
+    # 每个公司：重算分数，生成视图块
+    views = []
+    options = []
+    for pi, p in enumerate(profiles):
+        rows = []
+        for i, b in enumerate(base_rows, 1):
+            md_path = Path(meta[i - 1]["md"])
+            att_names = "、".join(a["name"] for a in meta[i - 1].get("attachments", []))
+            v = score_from_md(md_path, att_names, p)
+            r = dict(b)
+            r.update({"score": v["score"], "money_s": v["money_s"], "type_s": v["type_s"],
+                      "att_s": v["att_s"], "kw_s": v["kw_s"], "region_s": v["region_s"],
+                      "qual_s": v["qual_s"], "kw_hit": v["kw_hit"], "excl_hit": v["excl_hit"],
+                      "money_note": v["money_note"], "region_note": v["region_note"],
+                      "qual_note": v["qual_note"]})
+            rows.append(r)
+
+        srows = sorted(rows, key=lambda r: -r["score"])
+        body_rows = []
+        for r in srows:
+            body_rows.append(f"""<tr>
 <td>{r['index']}</td>
 <td><a href="{r['url']}" target="_blank">{r['title']}</a></td>
 <td>{r['code']}</td>
@@ -785,18 +952,32 @@ def generate_html_report(meta: list[dict], html_path: Path) -> Path:
 <td>{r['duration']}</td>
 <td>{r['att']}</td>
 </tr>""")
-
-    charts = make_value_charts(rows)
+        views.append(f"""<div class="view" id="view-{pi}"{' style="display:none"' if pi else ''}>
+<div class="profile-desc">{_profile_desc(p)}</div>
+{make_value_charts(rows)}
+<table>
+<thead>
+<tr><th>序号</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th></tr>
+</thead>
+<tbody>
+{''.join(body_rows)}
+</tbody>
+</table>
+</div>""")
+        options.append(f'<option value="{pi}"{" selected" if pi == 0 else ""}>{p.get("name", f"公司{pi}")}</option>')
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>招标报告统计报表</title>
+<title>招标报告统计报表（多公司价值视图）</title>
 <style>
 body {{ font-family: "Microsoft YaHei", "宋体", sans-serif; margin: 30px; background: #f5f7fa; }}
 h1 {{ text-align: center; color: #1f3a5f; }}
 .meta {{ text-align: center; color: #666; margin-bottom: 20px; }}
+.selector {{ text-align: center; margin: 16px 0 8px; }}
+.selector select {{ font-size: 16px; padding: 8px 16px; border: 1px solid #d0d7e2; border-radius: 6px; background: #fff; }}
+.profile-desc {{ background: #eef2f7; border-radius: 8px; padding: 12px 16px; margin: 8px 0 16px; color: #444; font-size: 13px; }}
 table {{ border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.08); }}
 th, td {{ border: 1px solid #d0d7e2; padding: 10px 12px; font-size: 14px; text-align: left; }}
 th {{ background: #1f3a5f; color: #fff; }}
@@ -806,20 +987,28 @@ a:hover {{ text-decoration: underline; }}
 .charts {{ display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 24px; }}
 .chart-card {{ flex: 1 1 480px; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); padding: 16px; }}
 .chart-title {{ font-size: 15px; font-weight: bold; color: #1f3a5f; margin-bottom: 8px; }}
+.notes {{ margin: 12px 0 0; padding-left: 18px; font-size: 12px; color: #555; }}
+.notes li {{ margin-bottom: 6px; }}
+.note {{ color: #888; }}
 </style>
 </head>
 <body>
-<h1>招标报告统计报表</h1>
-<p class="meta">共 {len(rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-{charts}
-<table>
-<thead>
-<tr><th>序号</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th></tr>
-</thead>
-<tbody>
-{''.join(body_rows)}
-</tbody>
-</table>
+<h1>招标报告统计报表（按公司视角）</h1>
+<p class="meta">共 {len(base_rows)} 份报告 · 生成时间 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} · 下拉切换不同公司的价值判断</p>
+<div class="selector">
+<label for="company">选择公司视角：</label>
+<select id="company" onchange="switchView(this.value)">
+{''.join(options)}
+</select>
+</div>
+{''.join(views)}
+<script>
+function switchView(idx) {{
+  document.querySelectorAll('.view').forEach(function(v) {{ v.style.display = 'none'; }});
+  var el = document.getElementById('view-' + idx);
+  if (el) el.style.display = '';
+}}
+</script>
 </body>
 </html>"""
     html_path.write_text(html, encoding="utf-8")
