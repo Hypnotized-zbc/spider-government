@@ -28,6 +28,7 @@ FILES = [
     "config.json",
     "main.py",
     "spider.py",
+    "zbgg_crawler.py",
     "tools/upload_github.py",
 ]
 
