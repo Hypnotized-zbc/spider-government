@@ -4,6 +4,24 @@
 
 ---
 
+## v1.5.0 — 2026-08-07
+
+### 新增（自动化健壮性）
+- Edge CDP 生命周期管理：
+  - `edge_alive()` 检查 CDP 存活
+  - `start_edge()` 自动启动 Edge（Windows 侧）
+  - `ensure_edge()` 主流程启动时自动确保 Edge 存活，无需手动运行前置脚本
+- 失败自动恢复：
+  - `fetch_detail()` 失败自动重启 Edge 并重试（默认 3 次）
+  - `download_attachment()` 失败自动重试（默认 3 次），并校验 PDF 头
+- CLI 参数：`python3 zbgg_crawler.py --limit N` 仅处理前 N 条，便于局部验证
+
+### 验证
+- 前 4 份报告完整运行：4 份 docx + 6 个 PDF 附件全部生成，PDF 头均有效（%PDF）
+- 汇总包"招标报告汇总.zip"含 4 个报告文件夹，自动复制到桌面
+
+---
+
 ## v1.4.2 — 2026-08-07
 
 ### 新增
