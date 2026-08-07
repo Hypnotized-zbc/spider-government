@@ -96,7 +96,10 @@ def main():
                 continue  # 目录或将被替换的文件
             if entry["path"] in REMOVE_FILES:
                 print(f"删除远程文件: {entry['path']}")
-                continue  # 需要删除的旧文件
+                # 显式标记删除：sha 为 null 时从树中移除该条目
+                tree_items.append({"path": entry["path"], "mode": "100644",
+                                   "type": "blob", "sha": None})
+                continue
             tree_items.append({"path": entry["path"], "mode": entry["mode"],
                                "type": "blob", "sha": entry["sha"]})
     for rel, sha in blobs.items():
