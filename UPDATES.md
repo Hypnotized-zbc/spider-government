@@ -1,5 +1,23 @@
 ---
 
+## v1.11.0 — 2026-08-07
+
+### 修复：zip 与报表混入历史报告
+- 根因：`make_summary_zip` 打包整个 docx 目录、`generate_html_report` 读 meta.json 全量，
+  与用户本次选择的爬取范围无关 → 每次运行都包含历史累积的全部报告
+- `make_summary_zip(zip_path, records)`：改为只打包传入的本次记录（docx + 附件）
+- `generate_html_report(records, html_path)`：改为只渲染传入的本次记录，不再读 meta.json
+- 主流程新增 `cur_meta`（本次范围结果集）：历史已爬的 URL 从 meta 复用，新爬的实时加入；
+  zip、报表、完成提示均基于 `cur_meta`
+- 完成提示区分：`本次 N 份公告（历史累计 M 份）`
+- 清理库存：历史 11 份报告归档至 `backups/archive_zbgg_data_*`，output 恢复干净
+
+### 验证
+- 模拟选前 3 份：zip 仅 3 个文件夹、报表仅 3 行、2 个 SVG 图表正常
+- 假数据契约测试：make_summary_zip / generate_html_report 新签名行为正确
+
+---
+
 ## v1.10.0 — 2026-08-07
 
 ### 新增：HTML 报表价值图表（不改动原表格）

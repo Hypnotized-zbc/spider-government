@@ -483,17 +483,23 @@ def make_report_zip(zip_path: Path, folder_name: str,
                     zf.write(f, f"{folder_name}/{f.name}")
 
 
-def make_summary_zip(zip_path: Path, docx_dir: Path, att_dir: Path):
-    """所有报告打进一个汇总 zip：每份报告一个文件夹（报告标题），含 docx + PDF 附件。"""
+def make_summary_zip(zip_path: Path, records: list[dict]):
+    """按本次报告记录打包：每份一个文件夹（docx + PDF 附件）。
+
+    只打包传入的 records（本次爬取范围），不再扫描整个 docx 目录，
+    避免历史累积的报告反复出现在压缩包里。
+    """
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for docx_file in sorted(docx_dir.glob("*.docx")):
-            folder_name = docx_file.stem
+        for rec in records:
+            docx_file = Path(rec["docx"])
+            if not docx_file.exists():
+                continue
+            folder_name = docx_file.stem  # 报告标题文件夹名
             zf.write(docx_file, f"{folder_name}/{docx_file.name}")
-            a_dir = att_dir / folder_name
-            if a_dir.is_dir():
-                for f in sorted(a_dir.rglob("*")):
-                    if f.is_file():
-                        zf.write(f, f"{folder_name}/{f.name}")
+            for att in rec.get("attachments", []):
+                ap = Path(att["path"])
+                if ap.exists():
+                    zf.write(ap, f"{folder_name}/{ap.name}")
 
 
 def desktop_path() -> Path:
@@ -733,13 +739,14 @@ def make_value_charts(rows: list[dict]) -> str:
             f'</div>')
 
 
-def generate_html_report(meta_path: Path, html_path: Path) -> Path:
-    """根据 meta.json 生成 HTML 统计报表。
+def generate_html_report(meta: list[dict], html_path: Path) -> Path:
+    """根据报告记录列表生成 HTML 统计报表。
 
+    只渲染传入的 records（本次爬取范围），不再从 meta.json 全量读取，
+    避免历史累积的报告反复出现在报表里。
     原表格保持原有结构与顺序不变，价值判断以独立 SVG 图表形式
     追加在表格上方（价值总分排行 + 价值构成分析）。
     """
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
     rows = []
     for i, m in enumerate(meta, 1):
         md_path = Path(m["md"])
@@ -918,8 +925,14 @@ def main(limit: int | None = None):
     if META_PATH.exists():
         meta = json.loads(META_PATH.read_text(encoding="utf-8"))
 
+    # 本次范围的结果集：历史已爬的直接复用，新爬的实时加入
+    cur_meta = []
     for idx, it in enumerate(items, 1):
         if it["url"] in done:
+            for m in meta:
+                if m["url"] == it["url"]:
+                    cur_meta.append(m)
+                    break
             continue
         print(f"[{idx}/{len(items)}] {it['date']} {it['title'][:40]}", flush=True)
         html = fetch_detail(it["url"])
@@ -943,9 +956,11 @@ def main(limit: int | None = None):
         pdfs = download_pdf_attachments(detail.get("attachments", []), att_dir)
         att_names = "、".join(a["name"] for a in pdfs)
         v = value_components(detail["title"], detail["body"], att_names)
-        meta.append({"date": it["date"], "title": detail["title"],
-                     "url": it["url"], "md": str(md_path), "docx": str(docx_path),
-                     "attachments": pdfs, "score": v["score"]})
+        rec = {"date": it["date"], "title": detail["title"],
+               "url": it["url"], "md": str(md_path), "docx": str(docx_path),
+               "attachments": pdfs, "score": v["score"]}
+        meta.append(rec)
+        cur_meta.append(rec)
         done.add(it["url"])
         # 每 10 条落盘一次进度
         if len(meta) % 10 == 0:
@@ -956,12 +971,13 @@ def main(limit: int | None = None):
     META_PATH.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     FAILED_PATH.write_text(json.dumps(failed, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 汇总打包：所有报告文件夹（docx + PDF 附件）打进"招标报告汇总.zip"
+    # 汇总打包：只打包本次范围（docx + PDF 附件），不再混入历史报告
     ZIP_DIR = OUT_DIR / "zbgg_zips"
     ZIP_DIR.mkdir(parents=True, exist_ok=True)
     summary_zip = ZIP_DIR / "招标报告汇总.zip"
-    if any(DOCX_DIR.glob("*.docx")):
-        make_summary_zip(summary_zip, DOCX_DIR, ATTACH_DIR)
+    desktop_dest = None
+    if cur_meta:
+        make_summary_zip(summary_zip, cur_meta)
         # 复制到桌面
         try:
             dest = desktop_path() / "招标报告汇总.zip"
@@ -971,7 +987,7 @@ def main(limit: int | None = None):
             print(f"复制到桌面失败: {e}", flush=True)
             desktop_dest = None
 
-    print(f"=== 完成: {len(meta)} 份公告 ===", flush=True)
+    print(f"=== 完成: 本次 {len(cur_meta)} 份公告（历史累计 {len(meta)} 份）===", flush=True)
     print(f"md 目录: {MD_DIR}", flush=True)
     print(f"docx 目录: {DOCX_DIR}", flush=True)
     print(f"附件目录: {ATTACH_DIR}", flush=True)
@@ -979,10 +995,10 @@ def main(limit: int | None = None):
     if desktop_dest:
         print(f"已复制到桌面: {desktop_dest}", flush=True)
 
-    # 生成 HTML 统计报表并打开
-    if meta:
+    # 生成 HTML 统计报表并打开（只含本次范围）
+    if cur_meta:
         html_path = OUT_DIR / "zbgg_report.html"
-        generate_html_report(META_PATH, html_path)
+        generate_html_report(cur_meta, html_path)
         print(f"统计报表: {html_path}", flush=True)
         open_html(html_path)
 
