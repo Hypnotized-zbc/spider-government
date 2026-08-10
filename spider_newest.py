@@ -791,6 +791,10 @@ def render_llm_report_html(report: dict) -> str:
     for it in items:
         idx = it.get("index", "-")
         score = it.get("score", "-")
+        try:
+            float(score)
+        except (TypeError, ValueError):
+            score = "-"
         verdict = it.get("verdict", "")
         reason = str(it.get("reason", "")).replace("\n", " ").strip()
         color = verdict_color.get(verdict, "#7f8c8d")
