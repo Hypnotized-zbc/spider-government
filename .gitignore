@@ -14,3 +14,4 @@ backups/
 # 凭据
 .git-credentials
 *.token
+llm_key.txt

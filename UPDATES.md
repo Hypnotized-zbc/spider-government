@@ -1,5 +1,29 @@
 ---
 
+## v2.2.0 — 2026-08-10
+
+### 新增：大模型动态价值报告（DeepSeek）
+- 价值报告改为由 DeepSeek（deepseek-v4-flash）动态生成，不再只靠规则加权数值：
+  - `llm_chat()`：调用 DeepSeek chat/completions（base_url https://api.deepseek.com/v1），
+    强制 JSON 输出，失败重试 2 次，401 时直接放弃
+  - `llm_value_report()`：把每条公告的 标题/编号/金额/工期/附件名/正文前 300 字 + 公司画像
+    打包发送给模型，返回 {summary, items[{index, score, verdict, reason}], notes}
+  - `render_llm_report_html()`：渲染为 HTML 卡片，每个公司视角视图块顶部显示
+    （总体判断 + 每条公告的 评分/跟进等级/理由 + 整体建议），按分数降序
+- 保留原规则评分图表（金额30/类型15/附件15/关键词20/地区10/资质10）作为参考：
+  LLM 调用失败或无 key 时自动回退到规则评分，报表不受影响
+- API key 读取：优先环境变量 `DEEPSEEK_API_KEY`，其次本地 `llm_key.txt`；
+  llm_key.txt 已加入 .gitignore，不会上传到 GitHub
+
+### 验证
+- 用现有 5 条真实公告 + 6 个公司视角实测：6 个视图全部生成 AI 卡片
+- 默认视角：排水管网项目 85 分「重点跟进」，理由匹配产业园/给排水/污水/市政关键词
+- 公路交通视角：整体判定为非主业、区域不符，建议忽略，与画像逻辑一致
+- LLM 调用成功（含 reasoning 字段，模型 deepseek-v4-flash 可用）
+
+---
+---
+
 ## v2.1.1 — 2026-08-07
 
 ### 修复：备份脚本未含公司画像

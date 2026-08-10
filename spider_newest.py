@@ -15,6 +15,7 @@
 import datetime
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -897,6 +898,149 @@ def _profile_desc(p: dict) -> str:
     return " ｜ ".join(parts) if parts else "无特殊配置"
 
 
+# ---------- LLM 动态价值报告（DeepSeek） ----------
+
+LLM_BASE_URL = "https://api.deepseek.com/v1"
+LLM_MODEL = "deepseek-v4-flash"
+LLM_TIMEOUT = 120
+
+
+def load_llm_key() -> str:
+    """读取 DeepSeek API key：优先环境变量 DEEPSEEK_API_KEY，其次本地 llm_key.txt。"""
+    env = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if env:
+        return env
+    key_file = Path(__file__).parent / "llm_key.txt"
+    if key_file.exists():
+        return key_file.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def llm_chat(system: str, user: str, tries: int = 2) -> str | None:
+    """调用 DeepSeek chat/completions，返回助手文本；失败返回 None。"""
+    key = load_llm_key()
+    if not key:
+        print("  未配置 DeepSeek API key（llm_key.txt 或环境变量 DEEPSEEK_API_KEY），跳过 AI 报告", flush=True)
+        return None
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4000,
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    for i in range(1, tries + 1):
+        try:
+            r = requests.post(f"{LLM_BASE_URL}/chat/completions",
+                              json=payload, headers=headers, timeout=LLM_TIMEOUT)
+            if r.status_code == 401:
+                print("  DeepSeek API key 无效（401）", flush=True)
+                return None
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            print(f"  LLM 调用失败（第 {i} 次）: {e}", flush=True)
+            time.sleep(2)
+    return None
+
+
+def llm_value_report(meta: list[dict], profile: dict) -> dict | None:
+    """调用 DeepSeek 动态生成某公司视角的价值报告，返回解析后的 dict 或 None。
+
+    输入：每条公告的 标题/编号/金额/工期/附件名/正文前 300 字；
+    输出：{"summary": 总体判断, "items": [{index, score, verdict, reason}], "notes": 建议}
+    """
+    rows = []
+    for i, m in enumerate(meta, 1):
+        md_path = Path(m["md"])
+        body = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
+        # 去掉 md 头部的 项目标题/项目编号/信息时间 行
+        body_lines = [l for l in body.splitlines()
+                      if not l.startswith(("项目标题：", "项目编号：", "信息时间："))]
+        body_clean = re.sub(r"\s+", " ", "\n".join(body_lines)).strip()
+        att_names = "、".join(a["name"] for a in m.get("attachments", []))
+        rows.append({
+            "index": i,
+            "title": m.get("title", ""),
+            "investment": extract_key_info(body).get("investment", ""),
+            "duration": extract_key_info(body).get("duration", ""),
+            "attachments": att_names,
+            "body": body_clean[:300],
+        })
+    if not rows:
+        return None
+    profile_desc = _profile_desc(profile)
+    system = ("你是资深工程招投标分析师。根据给定公司的业务画像，"
+              "从一批招标公告中判断哪些值得该公司跟进，并给出价值评分与理由。"
+              "只输出 JSON，不要多余文字。")
+    user = (f"公司画像：{profile_desc}\n\n"
+            f"招标公告列表（JSON）：\n{json.dumps(rows, ensure_ascii=False)}\n\n"
+            "请输出 JSON，格式严格如下：\n"
+            "{\"summary\": \"对这批公告的整体价值判断，100字以内\",\n"
+            " \"items\": [{\"index\": 1, \"score\": 0-100整数, "
+            "\"verdict\": \"重点跟进|值得关注|一般|忽略\", "
+            "\"reason\": \"一句话理由，60字以内\"}, ...],\n"
+            " \"notes\": \"给该公司的整体建议，100字以内\"}\n"
+            "items 必须覆盖列表中的每一条公告。")
+    text = llm_chat(system, user)
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # 兼容模型输出被 ```json 包裹的情况
+        m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
+def render_llm_report_html(report: dict) -> str:
+    """把 LLM 价值报告 dict 渲染成 HTML 片段；解析失败返回空串。"""
+    if not report:
+        return ""
+    summary = report.get("summary", "")
+    notes = report.get("notes", "")
+    items = report.get("items", [])
+    if not isinstance(items, list) or not items:
+        return ""
+    # 按分数降序
+    try:
+        items = sorted(items, key=lambda it: -float(it.get("score", 0)))
+    except (TypeError, ValueError):
+        pass
+    verdict_color = {"重点跟进": "#c0392b", "值得关注": "#e67e22",
+                     "一般": "#7f8c8d", "忽略": "#bdc3c7"}
+    lis = []
+    for it in items:
+        idx = it.get("index", "-")
+        score = it.get("score", "-")
+        verdict = it.get("verdict", "")
+        reason = it.get("reason", "")
+        color = verdict_color.get(verdict, "#7f8c8d")
+        lis.append(
+            f'<li><b>#{idx}</b> <span style="color:{color}">[{verdict}]</span> '
+            f'<b>{score}</b>分 — {reason}</li>')
+    parts = ['<div class="llm-card">']
+    parts.append('<div class="llm-title">AI 动态价值报告（DeepSeek）</div>')
+    if summary:
+        parts.append(f'<div class="llm-summary">总体判断：{summary}</div>')
+    parts.append('<ol class="llm-items">' + "".join(lis) + "</ol>")
+    if notes:
+        parts.append(f'<div class="llm-notes">建议：{notes}</div>')
+    parts.append("</div>")
+    return "\n".join(parts)
+
+
 def generate_html_report(meta: list[dict], html_path: Path,
                          profiles: list[dict] | None = None) -> Path:
     """根据报告记录生成 HTML 统计报表（单文件多公司下拉切换）。
@@ -940,6 +1084,11 @@ def generate_html_report(meta: list[dict], html_path: Path,
                       "qual_note": v["qual_note"]})
             rows.append(r)
 
+        # 大模型动态价值报告（失败则回退到规则评分，不影响报表）
+        print(f"  生成 AI 价值报告（{p.get('name', '公司')}）…", flush=True)
+        llm_report = llm_value_report(meta, p)
+        llm_html = render_llm_report_html(llm_report) if llm_report else ""
+
         srows = sorted(rows, key=lambda r: -r["score"])
         body_rows = []
         for r in srows:
@@ -954,6 +1103,7 @@ def generate_html_report(meta: list[dict], html_path: Path,
 </tr>""")
         views.append(f"""<div class="view" id="view-{pi}"{' style="display:none"' if pi else ''}>
 <div class="profile-desc">{_profile_desc(p)}</div>
+{llm_html}
 {make_value_charts(rows)}
 <table>
 <thead>
@@ -990,6 +1140,12 @@ a:hover {{ text-decoration: underline; }}
 .notes {{ margin: 12px 0 0; padding-left: 18px; font-size: 12px; color: #555; }}
 .notes li {{ margin-bottom: 6px; }}
 .note {{ color: #888; }}
+.llm-card {{ background: #fff8f0; border: 1px solid #f0d9b0; border-radius: 8px; padding: 14px 16px; margin: 8px 0 16px; }}
+.llm-title {{ font-size: 15px; font-weight: bold; color: #8a4b00; margin-bottom: 8px; }}
+.llm-summary {{ font-size: 13px; color: #6b4a1e; margin-bottom: 8px; line-height: 1.6; }}
+.llm-items {{ margin: 0 0 8px 20px; padding: 0; font-size: 13px; color: #444; }}
+.llm-items li {{ margin-bottom: 5px; line-height: 1.5; }}
+.llm-notes {{ font-size: 13px; color: #8a4b00; background: #fdf1e0; border-radius: 6px; padding: 8px 12px; }}
 </style>
 </head>
 <body>
