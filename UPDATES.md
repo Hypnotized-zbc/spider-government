@@ -1,5 +1,25 @@
 ---
 
+## v2.4.2 — 2026-08-10
+
+### 回退：撤销 v2.4.1（smart_input 自定义输入）
+- 问题：v2.4.1 的 `smart_input()` 使用 termios raw 模式逐字符读取，
+  在 VS Code 内置终端（WSL）下导致中文输入法（IME）完全无法上屏，连文字都无法输入
+- 处理：回退 spider_newest.py 至 v2.4.0（内置 `input()` 版本），
+  与 backups/20260810_093251 一致；smart_input / termios / tty / unicodedata 全部移除
+- 保留：临时公司交互录入（ask_temp_company）仍在，四行提示、回车跳过、不落盘逻辑不变
+- 已知遗留：input() 版中文退格在 VS Code 终端存在字节级残留（v2.4.1 想修的问题），
+  但可用性优先，不再用 raw 模式方案
+
+### 验证
+- 与 v2.4.0 备份 diff 一致；语法通过
+- smart_input / termios 已从源码移除
+- ask_temp_company 交互正常（模拟输入 1 家 + 回车结束）
+- 报表集成正常（7 视图：6 现有 + 1 临时，临时公司未落盘）
+
+---
+---
+
 ## v2.4.1 — 2026-08-10
 
 ### 修复：临时公司录入中文退格残留

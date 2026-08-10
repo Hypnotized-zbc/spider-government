@@ -19,10 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
-import termios
 import time
-import tty
-import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -817,74 +814,6 @@ def render_llm_report_html(report: dict) -> str:
 
 # ---------- 临时公司交互录入 ----------
 
-def _disp_width(s: str) -> int:
-    """计算字符串在等宽终端的显示列宽（中文等全角字符占 2 列）。"""
-    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
-
-
-def _pop_utf8_char(buf: bytearray):
-    """从字节缓冲区末尾弹出一个完整 UTF-8 字符（按首字节边界回退）。"""
-    if not buf:
-        return None
-    i = len(buf) - 1
-    while i > 0 and (buf[i] & 0xC0) == 0x80:
-        i -= 1
-    ch = bytes(buf[i:])
-    del buf[i:]
-    return ch
-
-
-_input_cache = b""   # smart_input 未消费完的输入字节（跨调用保留）
-
-
-def smart_input(prompt: str = "") -> str:
-    """逐字符读取输入，退格按完整 UTF-8 字符删除（修复中文退格残留）。
-
-    非 tty（管道/重定向）环境回退到内置 input()。
-    内部用模块级 _input_cache 缓存多读的字节，避免 termios 模式切换
-    丢失预写输入（连续多字段录入时不会卡住）。
-    """
-    global _input_cache
-    if not sys.stdin.isatty():
-        return input(prompt)
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    buf = bytearray()
-    try:
-        tty.setraw(fd)
-        sys.stdout.write(prompt)
-        sys.stdout.flush()
-        while True:
-            if not _input_cache:
-                data = os.read(fd, 4096)
-                if not data:
-                    break
-                _input_cache = data
-            b = _input_cache[0]
-            _input_cache = _input_cache[1:]
-            if b in (10, 13):      # 回车
-                sys.stdout.write("\r\n")
-                sys.stdout.flush()
-                return buf.decode("utf-8", errors="replace").strip()
-            if b == 3:             # Ctrl+C
-                raise KeyboardInterrupt
-            if b in (8, 127):      # 退格 BS / DEL
-                chd = _pop_utf8_char(buf)
-                if chd:
-                    w = _disp_width(chd.decode("utf-8", errors="replace"))
-                    sys.stdout.write("\b" * w + " " * w + "\b" * w)
-                    sys.stdout.flush()
-            elif b == 4:           # Ctrl+D 忽略
-                continue
-            elif b >= 32:
-                buf.append(b)
-                sys.stdout.write(chr(b))
-                sys.stdout.flush()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    return buf.decode("utf-8", errors="replace").strip()
-
-
 def _parse_keywords(text: str) -> dict:
     """把 '老旧小区,学校 医院' 解析为 {关键词: 1}，支持中英文逗号与空格分隔。"""
     kws = {}
@@ -922,16 +851,16 @@ def ask_temp_company() -> list[dict]:
     n = 1
     while True:
         print(f"\n--- 第 {n} 家公司（回车结束）---", flush=True)
-        name = smart_input("公司名称：")
+        name = input("公司名称：").strip()
         if not name:
             if n == 1:
                 print("未录入任何临时公司，仅使用现有公司画像。", flush=True)
             else:
                 print("结束录入。", flush=True)
             break
-        keywords = smart_input("关键词（逗号/空格分隔，回车跳过）：")
-        budget = smart_input("预算范围（万元，如 100-5000，回车跳过）：")
-        regions = smart_input("关注区域（逗号分隔，回车跳过）：")
+        keywords = input("关键词（逗号/空格分隔，回车跳过）：").strip()
+        budget = input("预算范围（万元，如 100-5000，回车跳过）：").strip()
+        regions = input("关注区域（逗号分隔，回车跳过）：").strip()
         p = {
             "name": name,
             "desc": f"临时录入：{name}",
