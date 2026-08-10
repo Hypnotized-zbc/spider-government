@@ -812,6 +812,71 @@ def render_llm_report_html(report: dict) -> str:
     return "\n".join(parts)
 
 
+# ---------- 临时公司交互录入 ----------
+
+def _parse_keywords(text: str) -> dict:
+    """把 '老旧小区,学校 医院' 解析为 {关键词: 1}，支持中英文逗号与空格分隔。"""
+    kws = {}
+    for part in re.split(r"[,，、\s]+", text.strip()):
+        if part:
+            kws[part] = 1
+    return kws
+
+
+def _parse_budget(text: str) -> list | None:
+    """把 '100-5000' 或 '100 5000' 解析为 [100, 5000]；无法解析返回 None。"""
+    m = re.search(r"(\d+(?:\.\d+)?)\s*[-~至]\s*(\d+(?:\.\d+)?)", text.replace("，", "-"))
+    if not m:
+        return None
+    lo, hi = float(m.group(1)), float(m.group(2))
+    if lo > hi:
+        lo, hi = hi, lo
+    return [lo, hi]
+
+
+def _parse_regions(text: str) -> list:
+    """把 '渝北,两江新区' 解析为区域列表。"""
+    return [r.strip() for r in re.split(r"[,，、\s]+", text.strip()) if r.strip()]
+
+
+def ask_temp_company() -> list[dict]:
+    """交互录入临时公司（不写入 company_profiles），返回画像列表，可为空。
+
+    四行提示：公司名称 / 关键词 / 预算 / 关注区域，均回车跳过；
+    公司名称为空（直接回车）视为结束录入。输入完一家自动询问下一家。
+    """
+    temps = []
+    print("\n=== 临时公司录入（仅本次生成 AI 价值报告使用，不保存到 company_profiles）===", flush=True)
+    print("每项可回车跳过；公司名称为空则结束录入。", flush=True)
+    n = 1
+    while True:
+        print(f"\n--- 第 {n} 家公司（回车结束）---", flush=True)
+        name = input("公司名称：").strip()
+        if not name:
+            if n == 1:
+                print("未录入任何临时公司，仅使用现有公司画像。", flush=True)
+            else:
+                print("结束录入。", flush=True)
+            break
+        keywords = input("关键词（逗号/空格分隔，回车跳过）：").strip()
+        budget = input("预算范围（万元，如 100-5000，回车跳过）：").strip()
+        regions = input("关注区域（逗号分隔，回车跳过）：").strip()
+        p = {
+            "name": name,
+            "desc": f"临时录入：{name}",
+            "keywords": _parse_keywords(keywords),
+            "exclude_keywords": [],
+            "qualifications": [],
+            "budget_range": _parse_budget(budget),
+            "regions": _parse_regions(regions),
+        }
+        temps.append(p)
+        print(f"已录入：{name}（关键词 {list(p['keywords'])}，"
+              f"预算 {p['budget_range']}，区域 {p['regions']}）", flush=True)
+        n += 1
+    return temps
+
+
 def generate_html_report(meta: list[dict], html_path: Path,
                          profiles: list[dict] | None = None) -> Path:
     """根据报告记录生成 HTML 统计报表（单文件多公司下拉切换）。
@@ -1112,8 +1177,11 @@ def main(limit: int | None = None):
 
     # 生成 HTML 统计报表并打开（只含本次范围）
     if cur_meta:
+        # 临时公司交互录入：不写 company_profiles，直接喂给 AI 生成价值报告
+        temps = ask_temp_company()
+        profiles = load_profiles() + temps
         html_path = OUT_DIR / "zbgg_report.html"
-        generate_html_report(cur_meta, html_path)
+        generate_html_report(cur_meta, html_path, profiles=profiles)
         print(f"统计报表: {html_path}", flush=True)
         open_html(html_path)
 
