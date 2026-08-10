@@ -74,10 +74,11 @@ spider_framework/
 - 需要网络能访问 cq.gov.cn、cqggzy.com、ggzydl.cqggzy.com
 - 桌面/临时目录均自动发现，不依赖固定用户名
 
-## AI 价值报告（DeepSeek，可选）
+## AI 价值报告（DeepSeek）
 
-HTML 报表顶部的「AI 动态价值报告」由 DeepSeek 大模型（deepseek-v4-flash）动态生成，
-按公司画像判断每条公告的跟进价值（评分/等级/理由），失败时自动回退到内置规则评分。
+HTML 报表中的「AI 动态价值报告」由 DeepSeek 大模型（deepseek-v4-flash）动态生成，
+按公司画像判断每条公告的跟进价值（评分/等级/理由），是唯一的价值判断来源；
+调用失败时报表仍正常展示基础表格（按原顺序）。
 
 配置 API key（二选一）：
 
@@ -86,7 +87,7 @@ export DEEPSEEK_API_KEY=sk-xxxx        # 方式1：环境变量
 echo sk-xxxx > llm_key.txt             # 方式2：项目根目录本地文件（已 gitignore，不会上传）
 ```
 
-未配置 key 时跳过 AI 报告，仅显示规则评分图表，不影响其余功能。
+未配置 key 时跳过 AI 报告，报表只显示基础表格，不影响其余功能。
 
 ## 更新记录
 

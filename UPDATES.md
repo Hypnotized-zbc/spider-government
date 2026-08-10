@@ -1,5 +1,32 @@
 ---
 
+## v2.3.0 — 2026-08-10
+
+### 变更：删除规则评分与图表，价值判断只由 AI 动态生成
+- 删除全部加权数值评分代码：`value_components()` / `score_from_md()` /
+  `budget_score()` / `region_score()` / `qual_mismatch()` /
+  TYPE_VALUE / INTEREST_KEYWORDS / QUAL_LEVEL 权重逻辑
+- 删除全部 SVG 图表代码：`make_value_charts()` 及其辅助常量
+  （CHART_COLORS / COMPONENT_NAMES / COMPONENT_MAX / _short_title / _match_notes），
+  HTML 报表不再包含图表卡片与相关 CSS
+- 价值判断完全交给 DeepSeek（deepseek-v4-flash）动态生成：
+  - 每个公司视角一份 AI 报告（总体判断 + 每条公告 评分/等级/理由 + 建议）
+  - 表格按 AI 报告分数降序排列；AI 失败时保持原序号顺序，不影响报表
+  - 爬取主流程不再计算 score，meta.json 不再写入 score 字段（历史数据中的 score 字段被忽略）
+- 优化：`llm_value_report()` 新增 `base_rows` 参数复用已解析的 金额/工期/附件，
+  避免对每份 md 重复读取与正则解析；`render_llm_report_html()` 容错非法 score、去除 reason 换行
+- 公司画像保留 keywords/exclude/qualifications/budget_range/regions 字段，
+  作为 LLM 的业务背景描述（`_profile_desc()`），不再参与数值计算
+
+### 验证
+- 6 个公司视角 × 5 条公告全部生成 AI 报告（真实 API 调用）
+- 报表无任何图表残留（无 value-charts / 价值总分排行 / chart-card）
+- 默认视角表格首行 = AI 评分最高的城口排水管网项目（index 5），排序与 AI 判断一致
+- 无 key 时报表正常回退：表格按原顺序展示，无 AI 卡片，不报错
+
+---
+---
+
 ## v2.2.0 — 2026-08-10
 
 ### 新增：大模型动态价值报告（DeepSeek）

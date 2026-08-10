@@ -14,7 +14,6 @@
 """
 import datetime
 import json
-import math
 import os
 import re
 import shutil
@@ -597,35 +596,18 @@ def extract_key_info(body: str) -> dict:
     return info
 
 
-# ---------- 价值评分（按公司画像） ----------
-
-# 招标类型 → 分值（总承包/施工通常体量大，咨询/监理次之）
-TYPE_VALUE = [
-    (20, ["EPC", "工程总承包", "设计施工", "设计采购施工"]),
-    (16, ["施工总承包", "工程施工", "标段施工", "施工招标"]),
-    (12, ["全过程咨询", "项目管理"]),
-    (8,  ["监理", "勘察设计", "初步设计", "施工图设计"]),
-]
-# 业务方向关键词（默认画像用，按自己关心的领域增删，命中越多价值越高）
-INTEREST_KEYWORDS = [
-    "老旧小区", "学校", "医院", "产业园", "数据中心", "智慧",
-    "市政", "道路", "污水", "给排水", "绿化", "装修", "托育",
-]
-# 资质等级次序：一级 > 二级 > 三级 > 不分等级(0)
-QUAL_LEVEL = {"一级": 3, "二级": 2, "三级": 1}
+# ---------- 公司画像（供 LLM 价值报告描述业务背景） ----------
 
 PROFILE_DIR = Path(__file__).parent / "company_profiles"
 
 DEFAULT_PROFILE = {
     "name": "默认（综合视角）",
-    "desc": "未配置公司画像时的通用评分",
-    "keywords": {k: 1 for k in INTEREST_KEYWORDS},
+    "desc": "未配置公司画像时的通用分析",
+    "keywords": {},
     "exclude_keywords": [],
     "qualifications": [],
     "budget_range": None,
     "regions": [],
-    "weights": {"money": 0.30, "type": 0.15, "attach": 0.15,
-                "kw": 0.20, "region": 0.10, "qual": 0.10},
 }
 
 
@@ -647,237 +629,8 @@ def load_profiles() -> list[dict]:
         p.setdefault("qualifications", [])
         p.setdefault("budget_range", None)
         p.setdefault("regions", [])
-        p.setdefault("weights", dict(DEFAULT_PROFILE["weights"]))
         profiles.append(p)
     return profiles
-
-
-def _qual_stem(q: str) -> str:
-    """资质主干词：去掉等级与后缀，如 '建筑工程施工总承包二级' → '建筑工程施工总承包'。"""
-    return re.sub(r"[一二三四]级|及以上|及以下|不分等级", "", q).strip()
-
-
-def qual_mismatch(body: str, qualifications: list[str]) -> tuple[str, float]:
-    """资质匹配：返回 (说明, 资质分 0-10)。
-
-    - 公司未填资质：中性 6 分
-    - 正文要求与公司资质主干词命中且等级不高于公司：10 分
-    - 命中但正文要求等级更高：0 分（资质不符）
-    - 正文无资质要求：7 分
-    - 正文有资质要求但无命中：2 分
-    """
-    if not qualifications:
-        return "未配置资质", 6.0
-    if "资质" not in body and "总承包" not in body and "专业承包" not in body:
-        return "正文未要求资质", 7.0
-    for q in qualifications:
-        stem = _qual_stem(q)
-        if stem in body:
-            m = re.search(re.escape(stem) + r"[^，。；\n]*?([一二三四]级)", body)
-            req_lv = QUAL_LEVEL.get(m.group(1), 0) if m else 0
-            own_lv = QUAL_LEVEL.get(re.search(r"([一二三四]级)", q).group(1), 0) if re.search(r"([一二三四]级)", q) else 0
-            if req_lv > own_lv:
-                return f"需{stem}（高于本公司）", 0.0
-            return f"资质匹配（{stem}）", 10.0
-    return "资质方向不符", 2.0
-
-
-def region_score(body: str, regions: list[str]) -> tuple[str, float]:
-    """地区匹配 0-10：正文建设地点命中关注区域→10，未写地点→5，未命中→0。"""
-    m = re.search(r"建设地点[：:]\s*([^。\n；]+)", body)
-    loc = m.group(1).strip() if m else ""
-    if not regions:
-        return "未配置地区", 5.0
-    if not loc:
-        return "正文未写建设地点", 5.0
-    for r in regions:
-        if r in loc:
-            return f"建设地点在{r}", 10.0
-    return f"建设地点不在关注区域（{loc[:12]}）", 0.0
-
-
-def budget_score(money_v: float, budget_range) -> tuple[str, float]:
-    """预算区间匹配：区间内按 log 给分（上限30），超出上限→0，低于下限→低分。"""
-    if budget_range is None:
-        return "", min(30.0, 7.5 * math.log10(money_v)) if money_v > 0 else 0.0
-    lo, hi = budget_range
-    if money_v <= 0:
-        return "未写明金额", 0.0
-    if money_v > hi:
-        return f"超出预算上限（{hi}万）", 0.0
-    if money_v < lo:
-        return f"低于预算下限（{lo}万）", min(10.0, 7.5 * math.log10(money_v))
-    return f"在预算区间内", min(30.0, 7.5 * math.log10(money_v))
-
-
-def value_components(title: str, body: str, att_names: str,
-                     profile: dict | None = None) -> dict:
-    """按公司画像从标题+正文+附件名计算价值分量，返回 0-100 总分与明细。
-
-    维度（满分=权重×100）：金额30 / 类型15 / 附件15 / 关键词20 / 地区10 / 资质10。
-    """
-    profile = profile or DEFAULT_PROFILE
-    w = profile.get("weights", DEFAULT_PROFILE["weights"])
-    full = f"{title} {body}"
-
-    # 金额
-    money_v = 0.0
-    for pat in [r"总投资金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
-                r"总投资[约为]?[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
-                r"合同估算金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元",
-                r"估算金额[：:]\s*(?:含税|不含税)?\s*([\d.,]+)\s*万元"]:
-        m = re.search(pat, body)
-        if m:
-            try:
-                money_v = float(m.group(1).replace(",", ""))
-            except ValueError:
-                pass
-            break
-    money_note, money_s = budget_score(money_v, profile.get("budget_range"))
-
-    # 类型
-    type_s = 4
-    for score, kws in TYPE_VALUE:
-        if any(kw in full for kw in kws):
-            type_s = score
-            break
-    type_s = min(type_s, 15)
-
-    # 附件
-    att_s = 0.0
-    if "工程量清单" in att_names or "图纸" in att_names:
-        att_s = 15.0
-    elif att_names:
-        att_s = 8.0
-
-    # 关键词：按画像加权命中
-    kws_map = profile.get("keywords", {})
-    hit = [kw for kw in kws_map if kw in full]
-    kw_s = min(20.0, 2.0 * sum(kws_map.get(kw, 1) for kw in hit))
-    # 排除词命中 → 大幅降权
-    excl_hit = [kw for kw in profile.get("exclude_keywords", []) if kw in full]
-    if excl_hit:
-        kw_s = min(kw_s, 5.0) - 5.0  # 命中排除词: 关键词分封顶 0
-        if kw_s < 0:
-            kw_s = 0.0
-
-    # 地区与资质
-    region_note, region_s = region_score(body, profile.get("regions", []))
-    qual_note, qual_s = qual_mismatch(body, profile.get("qualifications", []))
-
-    # 加权总分
-    total = round(w.get("money", 0.30) * 100 / 30 * money_s
-                  + w.get("type", 0.15) * 100 / 15 * type_s
-                  + w.get("attach", 0.15) * 100 / 15 * att_s
-                  + w.get("kw", 0.20) * 100 / 20 * kw_s
-                  + w.get("region", 0.10) * 100 / 10 * region_s
-                  + w.get("qual", 0.10) * 100 / 10 * qual_s, 1)
-
-    return {"score": total, "money": money_v, "money_s": money_s,
-            "type_s": type_s, "att_s": att_s, "kw_s": kw_s,
-            "region_s": region_s, "qual_s": qual_s,
-            "kw_hit": hit, "excl_hit": excl_hit,
-            "money_note": money_note, "region_note": region_note,
-            "qual_note": qual_note, "money_w": round(money_v, 2)}
-
-
-def score_from_md(md_path: Path, att_names: str = "",
-                  profile: dict | None = None) -> dict:
-    """从 md 文件 + 附件名计算价值分（供 HTML 报表与 meta 回填用）。"""
-    txt = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
-    fields = parse_md_fields(md_path)
-    return value_components(fields.get("title", ""), txt, att_names, profile)
-
-
-# ---------- 价值图表（纯 SVG，不依赖外部 CDN） ----------
-
-CHART_COLORS = ["#d35400", "#e67e22", "#f39c12", "#3498db", "#27ae60"]
-COMPONENT_NAMES = [("money_s", "金额"), ("type_s", "类型"), ("att_s", "附件"),
-                   ("kw_s", "关键词"), ("region_s", "地区"), ("qual_s", "资质")]
-COMPONENT_MAX = {"money_s": 30.0, "type_s": 15.0, "att_s": 15.0,
-                 "kw_s": 20.0, "region_s": 10.0, "qual_s": 10.0}
-
-
-def _short_title(title: str, n: int = 14) -> str:
-    return title if len(title) <= n else title[:n] + "…"
-
-
-def _match_notes(r: dict) -> str:
-    """拼出匹配原因说明（金额/地区/资质/关键词）。"""
-    notes = []
-    if r.get("money_note"):
-        notes.append(f"金额：{r['money_note']}")
-    if r.get("region_note"):
-        notes.append(f"地区：{r['region_note']}")
-    if r.get("qual_note"):
-        notes.append(f"资质：{r['qual_note']}")
-    if r.get("kw_hit"):
-        notes.append(f"关键词：{'、'.join(r['kw_hit'])}")
-    if r.get("excl_hit"):
-        notes.append(f"排除词命中：{'、'.join(r['excl_hit'])}")
-    return "；".join(notes) if notes else "无特殊说明"
-
-
-def make_value_charts(rows: list[dict]) -> str:
-    """生成价值图表 HTML（总分条形图 + 构成堆叠图 + 匹配明细），无数据返回空串。"""
-    if not rows:
-        return ""
-    srows = sorted(rows, key=lambda r: -r["score"])
-
-    # ---- 图1: 价值总分横向条形图 ----
-    H1 = len(srows) * 30 + 46
-    parts1 = []
-    parts1.append(f'<svg viewBox="0 0 960 {H1}" xmlns="http://www.w3.org/2000/svg" '
-                  f'preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">')
-    parts1.append(f'<text x="8" y="24" font-size="16" font-weight="bold" fill="#1f3a5f">价值总分排行（满分 100）</text>')
-    for i, r in enumerate(srows):
-        y = 46 + i * 30
-        sc = r["score"]
-        color = "#c0392b" if sc >= 75 else "#e67e22" if sc >= 60 else "#95a5a6"
-        parts1.append(f'<text x="8" y="{y+15}" font-size="12" fill="#333" text-anchor="start">{_short_title(r["title"])}</text>')
-        parts1.append(f'<rect x="170" y="{y+2}" width="660" height="20" rx="4" fill="#eef2f7"/>')
-        w = max(4, 660 * sc / 100.0)
-        parts1.append(f'<rect x="170" y="{y+2}" width="{w:.1f}" height="20" rx="4" fill="{color}"/>')
-        parts1.append(f'<text x="838" y="{y+17}" font-size="13" font-weight="bold" fill="#1f3a5f">{sc:.1f}</text>')
-    parts1.append("</svg>")
-
-    # ---- 图2: 分量堆叠图（各维度占满分比例） ----
-    H2 = len(srows) * 30 + 90
-    parts2 = []
-    parts2.append(f'<svg viewBox="0 0 960 {H2}" xmlns="http://www.w3.org/2000/svg" '
-                  f'preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;display:block">')
-    parts2.append(f'<text x="8" y="24" font-size="16" font-weight="bold" fill="#1f3a5f">价值构成（按维度满分归一）</text>')
-    # 图例
-    lx = 170
-    for (k, name), color in zip(COMPONENT_NAMES, CHART_COLORS):
-        parts2.append(f'<rect x="{lx}" y="36" width="12" height="12" fill="{color}"/>')
-        parts2.append(f'<text x="{lx+16}" y="46" font-size="12" fill="#333">{name}</text>')
-        lx += 66
-    for i, r in enumerate(srows):
-        y = 62 + i * 30
-        parts2.append(f'<text x="8" y="{y+15}" font-size="12" fill="#333">{_short_title(r["title"])}</text>')
-        parts2.append(f'<rect x="170" y="{y+2}" width="660" height="20" rx="4" fill="#eef2f7"/>')
-        x = 170
-        for (k, name), color in zip(COMPONENT_NAMES, CHART_COLORS):
-            seg = 660 * r[k] / COMPONENT_MAX[k]
-            if seg < 0.5:
-                continue
-            parts2.append(f'<rect x="{x:.1f}" y="{y+2}" width="{seg:.1f}" height="20" fill="{color}"/>')
-            x += seg
-        parts2.append(f'<text x="838" y="{y+17}" font-size="13" font-weight="bold" fill="#1f3a5f">{r["score"]:.1f}</text>')
-    parts2.append("</svg>")
-
-    # ---- 匹配明细 ----
-    notes = []
-    for i, r in enumerate(srows, 1):
-        notes.append(f"<li><b>{i}. {r['title']}</b>（{r['score']:.1f} 分）<br>"
-                     f"<span class=\"note\">{_match_notes(r)}</span></li>")
-
-    return (f'<div class="charts">'
-            f'<div class="chart-card"><div class="chart-title">价值高低总览</div>{chr(10).join(parts1)}</div>'
-            f'<div class="chart-card"><div class="chart-title">价值构成分析</div>{chr(10).join(parts2)}'
-            f'<ul class="notes">{chr(10).join(notes)}</ul></div>'
-            f'</div>')
 
 
 def _profile_desc(p: dict) -> str:
@@ -950,11 +703,14 @@ def llm_chat(system: str, user: str, tries: int = 2) -> str | None:
     return None
 
 
-def llm_value_report(meta: list[dict], profile: dict) -> dict | None:
+def llm_value_report(meta: list[dict], profile: dict,
+                     base_rows: list[dict] | None = None) -> dict | None:
     """调用 DeepSeek 动态生成某公司视角的价值报告，返回解析后的 dict 或 None。
 
     输入：每条公告的 标题/编号/金额/工期/附件名/正文前 300 字；
     输出：{"summary": 总体判断, "items": [{index, score, verdict, reason}], "notes": 建议}
+    base_rows：generate_html_report 已解析好的基础行（含 investment/duration/att），
+    传入可避免重复读取 md 文件；不传则在此自行解析。
     """
     rows = []
     for i, m in enumerate(meta, 1):
@@ -964,12 +720,21 @@ def llm_value_report(meta: list[dict], profile: dict) -> dict | None:
         body_lines = [l for l in body.splitlines()
                       if not l.startswith(("项目标题：", "项目编号：", "信息时间："))]
         body_clean = re.sub(r"\s+", " ", "\n".join(body_lines)).strip()
-        att_names = "、".join(a["name"] for a in m.get("attachments", []))
+        if base_rows and i - 1 < len(base_rows):
+            b = base_rows[i - 1]
+            investment = b.get("investment", "-")
+            duration = b.get("duration", "-")
+            att_names = b.get("att", "-")
+        else:
+            key = extract_key_info(body)
+            investment = key.get("investment", "")
+            duration = key.get("duration", "")
+            att_names = "、".join(a["name"] for a in m.get("attachments", []))
         rows.append({
             "index": i,
             "title": m.get("title", ""),
-            "investment": extract_key_info(body).get("investment", ""),
-            "duration": extract_key_info(body).get("duration", ""),
+            "investment": investment,
+            "duration": duration,
             "attachments": att_names,
             "body": body_clean[:300],
         })
@@ -1013,11 +778,13 @@ def render_llm_report_html(report: dict) -> str:
     items = report.get("items", [])
     if not isinstance(items, list) or not items:
         return ""
-    # 按分数降序
-    try:
-        items = sorted(items, key=lambda it: -float(it.get("score", 0)))
-    except (TypeError, ValueError):
-        pass
+    # 按分数降序；score 缺失/非法视为 0
+    def _fscore(it) -> float:
+        try:
+            return float(it.get("score", 0))
+        except (TypeError, ValueError):
+            return 0.0
+    items = sorted(items, key=lambda it: -_fscore(it))
     verdict_color = {"重点跟进": "#c0392b", "值得关注": "#e67e22",
                      "一般": "#7f8c8d", "忽略": "#bdc3c7"}
     lis = []
@@ -1025,7 +792,7 @@ def render_llm_report_html(report: dict) -> str:
         idx = it.get("index", "-")
         score = it.get("score", "-")
         verdict = it.get("verdict", "")
-        reason = it.get("reason", "")
+        reason = str(it.get("reason", "")).replace("\n", " ").strip()
         color = verdict_color.get(verdict, "#7f8c8d")
         lis.append(
             f'<li><b>#{idx}</b> <span style="color:{color}">[{verdict}]</span> '
@@ -1045,7 +812,7 @@ def generate_html_report(meta: list[dict], html_path: Path,
                          profiles: list[dict] | None = None) -> Path:
     """根据报告记录生成 HTML 统计报表（单文件多公司下拉切换）。
 
-    每个公司画像生成独立视图块（画像说明 + 价值图表 + 原表按该公司价值降序），
+    每个公司画像生成独立视图块（画像说明 + AI 动态价值报告 + 原表），
     顶部下拉切换，前端 JS 仅做显示切换，无外部依赖。未配置画像时只用默认视角。
     """
     profiles = profiles if profiles is not None else load_profiles()
@@ -1071,25 +838,23 @@ def generate_html_report(meta: list[dict], html_path: Path,
     views = []
     options = []
     for pi, p in enumerate(profiles):
-        rows = []
-        for i, b in enumerate(base_rows, 1):
-            md_path = Path(meta[i - 1]["md"])
-            att_names = "、".join(a["name"] for a in meta[i - 1].get("attachments", []))
-            v = score_from_md(md_path, att_names, p)
-            r = dict(b)
-            r.update({"score": v["score"], "money_s": v["money_s"], "type_s": v["type_s"],
-                      "att_s": v["att_s"], "kw_s": v["kw_s"], "region_s": v["region_s"],
-                      "qual_s": v["qual_s"], "kw_hit": v["kw_hit"], "excl_hit": v["excl_hit"],
-                      "money_note": v["money_note"], "region_note": v["region_note"],
-                      "qual_note": v["qual_note"]})
-            rows.append(r)
-
-        # 大模型动态价值报告（失败则回退到规则评分，不影响报表）
+        # 大模型动态价值报告（失败时表格保持原顺序展示）
         print(f"  生成 AI 价值报告（{p.get('name', '公司')}）…", flush=True)
-        llm_report = llm_value_report(meta, p)
+        llm_report = llm_value_report(meta, p, base_rows=base_rows)
         llm_html = render_llm_report_html(llm_report) if llm_report else ""
 
-        srows = sorted(rows, key=lambda r: -r["score"])
+        # 表格顺序：优先按 AI 报告分数降序；AI 失败则按原序号
+        if llm_report and isinstance(llm_report.get("items"), list):
+            score_map = {}
+            for it in llm_report["items"]:
+                try:
+                    score_map[int(it.get("index"))] = float(it.get("score", 0))
+                except (TypeError, ValueError):
+                    continue
+            srows = sorted(base_rows, key=lambda r: -score_map.get(r["index"], 0))
+        else:
+            srows = base_rows
+
         body_rows = []
         for r in srows:
             body_rows.append(f"""<tr>
@@ -1104,7 +869,6 @@ def generate_html_report(meta: list[dict], html_path: Path,
         views.append(f"""<div class="view" id="view-{pi}"{' style="display:none"' if pi else ''}>
 <div class="profile-desc">{_profile_desc(p)}</div>
 {llm_html}
-{make_value_charts(rows)}
 <table>
 <thead>
 <tr><th>序号</th><th>名称</th><th>项目编号</th><th>信息时间</th><th>投资金额</th><th>工期</th><th>附件</th></tr>
@@ -1134,12 +898,6 @@ th {{ background: #1f3a5f; color: #fff; }}
 tr:nth-child(even) {{ background: #f8fafc; }}
 a {{ color: #1f6feb; text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
-.charts {{ display: flex; flex-wrap: wrap; gap: 20px; margin-bottom: 24px; }}
-.chart-card {{ flex: 1 1 480px; background: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); padding: 16px; }}
-.chart-title {{ font-size: 15px; font-weight: bold; color: #1f3a5f; margin-bottom: 8px; }}
-.notes {{ margin: 12px 0 0; padding-left: 18px; font-size: 12px; color: #555; }}
-.notes li {{ margin-bottom: 6px; }}
-.note {{ color: #888; }}
 .llm-card {{ background: #fff8f0; border: 1px solid #f0d9b0; border-radius: 8px; padding: 14px 16px; margin: 8px 0 16px; }}
 .llm-title {{ font-size: 15px; font-weight: bold; color: #8a4b00; margin-bottom: 8px; }}
 .llm-summary {{ font-size: 13px; color: #6b4a1e; margin-bottom: 8px; line-height: 1.6; }}
@@ -1309,11 +1067,9 @@ def main(limit: int | None = None):
         att_dir = ATTACH_DIR / name
         att_dir.mkdir(parents=True, exist_ok=True)
         pdfs = download_pdf_attachments(detail.get("attachments", []), att_dir)
-        att_names = "、".join(a["name"] for a in pdfs)
-        v = value_components(detail["title"], detail["body"], att_names)
         rec = {"date": it["date"], "title": detail["title"],
                "url": it["url"], "md": str(md_path), "docx": str(docx_path),
-               "attachments": pdfs, "score": v["score"]}
+               "attachments": pdfs}
         meta.append(rec)
         cur_meta.append(rec)
         done.add(it["url"])
