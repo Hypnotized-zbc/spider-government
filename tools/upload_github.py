@@ -27,12 +27,12 @@ FILES = [
     "backup.sh",
     "install.sh",
     "requirements.txt",
-    "config.json",
-    "main.py",
-    "spider.py",
     "spider_newest.py",
     "tools/upload_github.py",
     "tools/score_reports.py",
+    "demo/agent_nl/agent_nl.py",
+    "demo/agent_nl/README.md",
+    "demo/agent_nl/requirements.txt",
     "company_profiles/渝发建设.json",
     "company_profiles/市政环境.json",
     "company_profiles/电力能源.json",
@@ -43,6 +43,9 @@ FILES = [
 # 需要从远程删除的旧文件（本地已移除/重命名）
 REMOVE_FILES = [
     "zbgg_crawler.py",
+    "spider.py",
+    "main.py",
+    "config.json",
 ]
 
 ROOT = Path(__file__).resolve().parent.parent

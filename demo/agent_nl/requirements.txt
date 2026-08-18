@@ -1,0 +1,4 @@
+# Agent 轻量化改造 Demo 额外依赖
+# 原工程依赖见项目根 requirements.txt（requests/beautifulsoup4/python-docx/websocket-client）
+# openpyxl 仅"导出 Excel"需要；不装则自动降级为 CSV（Excel 可直接打开）
+openpyxl>=3.1

@@ -1,5 +1,22 @@
 ---
 
+## v2.5.0 — 2026-08-18
+
+### 仓库规范化（Day2 收尾）
+- 删除无效冗余代码：通用爬虫脚手架 `spider.py` / `main.py` / `config.json`
+  （v1.0 时代遗留，已被 spider_newest.py 取代，全仓库无任何引用）
+- README 补全：功能一览、部署方式、Agent 轻量化改造 Demo 章节、项目结构同步
+- 新增 `demo/agent_nl/`：自然语言指令入口（Agent 作为调度者调用原有工具，
+  详见 demo/agent_nl/README.md）
+- `tools/upload_github.py`：FILES 清单移除脚手架、加入 demo 文件；REMOVE_FILES 增加
+  spider.py / main.py / config.json 远程清理
+
+### 验证
+- git rm 删除三个脚手架文件；README 结构树与仓库一致
+- demo/agent_nl 离线演示（--demo 2/3）与"近N份"指令解析通过
+
+---
+
 ## v2.4.2 — 2026-08-10
 
 ### 回退：撤销 v2.4.1（smart_input 自定义输入）
