@@ -268,28 +268,53 @@ def _parse_runs(node, runs: list):
 def extract_detail(html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
     wrapper = soup.select_one(".detail-wrapper")
+    title = "无标题"
+    code = ""
+    info_time = ""
     if wrapper:
-        h1s = wrapper.find_all("h1")
-        title = h1s[0].get_text(strip=True) if h1s else "无标题"
-        # 项目编号：h1 形如 "项目编号：xxx"
-        code = ""
-        for h in h1s:
-            t = h.get_text(strip=True)
+        # 新版页面（2026-08 改版）：无 h1，标题在 div.font-bold.text-2xl，
+        # 项目编号在紧随其后的 div.text-2xl（文本形如 "项目编号：xxx"）
+        title_el = wrapper.select_one("div[class*='text-2xl']")
+        if title_el:
+            title = title_el.get_text(strip=True) or title
+        for div in wrapper.select("div[class*='text-2xl']"):
+            t = div.get_text(strip=True)
             if t.startswith("项目编号"):
-                code = t.split("：", 1)[-1].strip()
+                code = re.split(r"[：:]", t, maxsplit=1)[-1].strip()
                 break
+        # 旧版页面兼容：h1 承载标题与编号
+        if not title_el:
+            h1s = wrapper.find_all("h1")
+            if h1s:
+                title = h1s[0].get_text(strip=True) or title
+                for h in h1s:
+                    t = h.get_text(strip=True)
+                    if t.startswith("项目编号"):
+                        code = re.split(r"[：:]", t, maxsplit=1)[-1].strip()
+                        break
         # 信息时间：wrapper 中文本 "信息时间：yyyy-mm-dd"
-        info_time = ""
         for el in wrapper.find_all(string=lambda s: s and "信息时间：" in s):
             m = re.search(r"信息时间：(\S+)", el)
             if m:
                 info_time = m.group(1)
                 break
     else:
+        # 无 .detail-wrapper 的旧版详情页
         title_el = soup.select_one("h1") or soup.select_one(".gonggaotitle")
-        title = title_el.get_text(strip=True) if title_el else "无标题"
+        if title_el:
+            title = title_el.get_text(strip=True) or title
         code = ""
         info_time = ""
+    # 兜底：正文区 .gonggaotitle 通常带"招标公告"后缀，去后缀作为标题
+    if title == "无标题":
+        gt = soup.select_one(".gonggaotitle")
+        if gt:
+            t = gt.get_text(strip=True)
+            for suf in ("公开招标公告", "招标公告", "采购公告", "竞争性磋商公告"):
+                if t.endswith(suf):
+                    t = t[: -len(suf)].strip()
+                    break
+            title = t or title
     # 正文：按 app-detail 内子块顺序，识别 titleStr(小标题) + content(正文)
     paragraphs = []
     texts = []
@@ -490,16 +515,23 @@ def make_summary_zip(zip_path: Path, records: list[dict]):
     避免历史累积的报告反复出现在压缩包里。
     """
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        seen = set()  # 防同名记录（标题相同导致文件名相同）重复写入
         for rec in records:
             docx_file = Path(rec["docx"])
             if not docx_file.exists():
                 continue
             folder_name = docx_file.stem  # 报告标题文件夹名
-            zf.write(docx_file, f"{folder_name}/{docx_file.name}")
+            entries = [(docx_file, f"{folder_name}/{docx_file.name}")]
             for att in rec.get("attachments", []):
                 ap = Path(att["path"])
                 if ap.exists():
-                    zf.write(ap, f"{folder_name}/{ap.name}")
+                    entries.append((ap, f"{folder_name}/{ap.name}"))
+            for src, arc in entries:
+                if arc in seen:
+                    print(f"    [zip] 跳过重复条目: {arc}", flush=True)
+                    continue
+                seen.add(arc)
+                zf.write(src, arc)
 
 
 def desktop_path() -> Path:
